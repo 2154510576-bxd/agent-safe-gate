@@ -4,7 +4,7 @@ using AiApproval.Core;
 
 namespace AiApproval.Security;
 
-/// <summary>JWT 载荷（自实现紧凑 JWT，避免引入第三方算法库带来的算法混淆面）。</summary>
+//JWT 载荷
 public sealed class TokenPayload
 {
     public string sub { get; set; } = "";
@@ -19,16 +19,7 @@ public sealed class TokenPayload
     public string aud { get; set; } = "";
 }
 
-/// <summary>
-/// 令牌签发与校验。
-///
-/// 安全要点：
-///   * 只接受 HS256，显式拒绝 alg=none / 其它算法（算法混淆攻击）；
-///   * 签名恒定时间比较；
-///   * 校验 iss / aud / exp / iat（且 iat 不能在未来）；
-///   * 载荷带 epo（令牌世代）：改密码、改角色、禁用账号都会 +1，使旧令牌立刻失效；
-///   * 载荷带 sk（请求签名密钥）：所有"状态变更"请求必须用它做 HMAC 签名，防重放与篡改。
-/// </summary>
+//令牌签发与校验，只接受 HS256
 public sealed class JwtService
 {
     private const string Issuer = "aiapproval";
@@ -44,6 +35,7 @@ public sealed class JwtService
         _key = cfg.DeriveMacKey("jwt");
     }
 
+    //签发令牌
     public string Issue(string userId, string userName, string role, int epoch, out string signKey, out DateTime expiresAt)
     {
         signKey = Crypto.RandomUrlSafe(32);
@@ -70,7 +62,7 @@ public sealed class JwtService
         return signing + "." + sig;
     }
 
-    /// <summary>校验并返回载荷；任何一项不满足都返回 null，不抛出（避免把校验细节泄露给调用方）。</summary>
+    //校验令牌，失败返回 null
     public TokenPayload? Validate(string? token, out string failure)
     {
         failure = "";
@@ -79,7 +71,7 @@ public sealed class JwtService
         var parts = token.Split('.');
         if (parts.Length != 3) { failure = "令牌格式错误"; return null; }
 
-        // 头部必须先判定算法，任何非 HS256 一律拒绝
+        //先判算法，非 HS256 拒绝
         string alg;
         try
         {

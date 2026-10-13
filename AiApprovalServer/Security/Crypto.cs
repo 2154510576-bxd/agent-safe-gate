@@ -3,13 +3,21 @@ using System.Text;
 
 namespace AiApproval.Security;
 
-/// <summary>
-/// 密码学原语集中封装：密码摘要、对称加密、MAC、恒定时间比较。
-/// 全部使用 .NET 内置实现，不自行发明算法，也不使用已被淘汰的 DES/MD5/SHA1。
-/// </summary>
+//密码学原语集中封装
 public static class Crypto
 {
-    public const int Pbkdf2Iterations = 210_000;
+    //口令哈希默认迭代次数
+    public const int PasswordIterationsDefault = 1_200_000;
+
+    //当前口令方案
+    public const string PasswordSchemeCurrent = "pbkdf2-sha256+pepper";
+
+    //旧口令方案
+    public const string PasswordSchemeLegacy = "pbkdf2-sha256";
+
+    //协作方口令方案
+    public const string PasswordSchemePartner = "partner-pbkdf2-sha256";
+
     private const int SaltBytes = 16;
     private const int NonceBytes = 12;
     private const int TagBytes = 16;
@@ -18,31 +26,37 @@ public static class Crypto
 
     public static string RandomHex(int bytes) => Convert.ToHexString(RandomNumberGenerator.GetBytes(bytes)).ToLowerInvariant();
 
-    /// <summary>URL 安全随机串（用于 nonce、任务 ID、审批令牌）。</summary>
+    //URL 安全随机串
     public static string RandomUrlSafe(int bytes) =>
         Convert.ToBase64String(RandomNumberGenerator.GetBytes(bytes)).Replace('+', '-').Replace('/', '_').TrimEnd('=');
 
-    public static byte[] Pbkdf2(string password, byte[] salt, int iterations = Pbkdf2Iterations)
+    public static byte[] Pbkdf2(byte[] password, byte[] salt, int iterations)
         => Rfc2898DeriveBytes.Pbkdf2(password, salt, iterations, HashAlgorithmName.SHA256, 32);
 
-    public static (string hash, string salt, int iterations) HashPassword(string password)
+    //服务端密钥参与口令摘要
+    public static byte[] Pepper(byte[] pepperKey, string password)
+        => HMACSHA256.HashData(pepperKey, Encoding.UTF8.GetBytes(password));
+
+    //生成口令材料
+    public static (string hash, string salt, int iterations, string scheme) HashPassword(
+        string password, byte[] pepperKey, int iterations = PasswordIterationsDefault)
     {
         var salt = RandomNumberGenerator.GetBytes(SaltBytes);
-        var hash = Pbkdf2(password, salt);
-        return (Convert.ToBase64String(hash), Convert.ToBase64String(salt), Pbkdf2Iterations);
+        var hash = Pbkdf2(Pepper(pepperKey, password), salt, iterations);
+        return (Convert.ToBase64String(hash), Convert.ToBase64String(salt), iterations, PasswordSchemeCurrent);
     }
 
-    /// <summary>
-    /// 恒定时间口令校验。即使账号不存在也调用一次（调用方传 dummy=true），
-    /// 让"用户名不存在"与"密码错误"的耗时一致，避免用户名枚举。
-    /// </summary>
-    public static bool VerifyPassword(string password, string hashB64, string saltB64, int iterations, bool dummy = false)
+    //恒定时间校验口令，dummy 防枚举
+    public static bool VerifyPassword(string password, string hashB64, string saltB64, int iterations,
+        string scheme, byte[] pepperKey, bool dummy = false)
     {
+        if (iterations <= 0) iterations = PasswordIterationsDefault;
+
         byte[] expected;
         try
         {
             expected = dummy
-                ? Pbkdf2("dummy-password-for-timing", Convert.FromBase64String(saltB64), iterations)
+                ? Pbkdf2(Pepper(pepperKey, "dummy-password-for-timing"), Convert.FromBase64String(saltB64), iterations)
                 : Convert.FromBase64String(hashB64);
         }
         catch
@@ -50,10 +64,20 @@ public static class Crypto
             return false;
         }
 
-        var actual = Pbkdf2(password, TrySalt(saltB64), iterations);
+        var material = UsesPepper(scheme) ? Pepper(pepperKey, password) : Encoding.UTF8.GetBytes(password);
+        var actual = Pbkdf2(material, TrySalt(saltB64), iterations);
         var equal = CryptographicOperations.FixedTimeEquals(expected, actual);
         return !dummy && equal;
     }
+
+    //该方案是否用服务端密钥
+    public static bool UsesPepper(string scheme)
+        => string.Equals(scheme, PasswordSchemeCurrent, StringComparison.OrdinalIgnoreCase);
+
+    //参数落后需静默升级
+    public static bool NeedsUpgrade(string scheme, int iterations, int targetIterations)
+        => !string.Equals(scheme, PasswordSchemeCurrent, StringComparison.OrdinalIgnoreCase)
+           || iterations < targetIterations;
 
     private static byte[] TrySalt(string saltB64)
     {
@@ -61,7 +85,7 @@ public static class Crypto
         catch { return new byte[SaltBytes]; }
     }
 
-    /// <summary>AES-256-GCM 加密。输出 base64(nonce | tag | cipher)。AAD 绑定用途，防止密文被跨场景搬用。</summary>
+    //AES-256-GCM 加密
     public static string AesGcmEncrypt(string plaintext, byte[] key, string aad)
     {
         var nonce = RandomNumberGenerator.GetBytes(NonceBytes);
@@ -79,6 +103,7 @@ public static class Crypto
         return Convert.ToBase64String(output);
     }
 
+    //AES-256-GCM 解密
     public static string? AesGcmDecrypt(string cipherB64, byte[] key, string aad)
     {
         try
@@ -97,18 +122,19 @@ public static class Crypto
         }
         catch
         {
-            // 认证失败 = 密文被篡改或密钥不匹配，一律返回 null，绝不返回部分明文
+            //认证失败一律返回 null
             return null;
         }
     }
 
+    //HMAC-SHA256 十六进制
     public static string HmacHex(string message, byte[] key)
         => Convert.ToHexString(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(message))).ToLowerInvariant();
 
     public static string HmacB64(string message, byte[] key)
         => Convert.ToBase64String(HMACSHA256.HashData(key, Encoding.UTF8.GetBytes(message)));
 
-    /// <summary>恒定时间字符串比较（长度不同也不提前返回，避免计时侧信道）。</summary>
+    //恒定时间比较，防计时侧信道
     public static bool FixedEquals(string? a, string? b)
     {
         if (a is null || b is null) return false;
@@ -126,7 +152,7 @@ public static class Crypto
 
     public static string Sha256Hex(string text) => Sha256Hex(Encoding.UTF8.GetBytes(text));
 
-    /// <summary>脱敏展示（日志/界面用），保留首尾少量字符。</summary>
+    //脱敏展示
     public static string Mask(string? value, int keepHead = 2, int keepTail = 2)
     {
         if (string.IsNullOrEmpty(value)) return "";

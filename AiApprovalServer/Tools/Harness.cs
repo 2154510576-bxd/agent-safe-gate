@@ -5,10 +5,10 @@ using AiApproval.Services;
 
 namespace AiApproval.Tools;
 
-/// <summary>反向操作数据（Undo Log）：记录"怎么把这一步撤销"。</summary>
+//记录怎么撤销这一步
 public sealed class UndoLog
 {
-    public string Kind { get; set; } = "file";     // file | dataset | notice
+    public string Kind { get; set; } = "file";     //file | dataset | notice
     public string Scope { get; set; } = "private";
     public string Relative { get; set; } = "";
     public bool Existed { get; set; }
@@ -20,7 +20,7 @@ public sealed class UndoLog
     public bool Inserted { get; set; }
     public string NoticeId { get; set; } = "";
     public string RollbackOf { get; set; } = "";
-    /// <summary>改名操作的"改成了什么"（回退时需要把新名字删掉再恢复旧文件）</summary>
+    //改名后的新名字
     public string RenamedTo { get; set; } = "";
 }
 
@@ -32,14 +32,7 @@ public sealed class HarnessResult
     public List<string> VersionIds { get; init; } = new();
 }
 
-/// <summary>
-/// Harness 工具层：唯一真正接触底层文件/数据的地方。
-///
-/// 三条铁律：
-///   1) 只认识 <see cref="ToolCatalog"/> 里的工具名（AI 编不出新工具）；
-///   2) 只使用规则引擎产出的规范化参数，绝不重新解析模型原文（防"二次解析"绕过校验）；
-///   3) 任何写操作前先落快照、写操作后立刻落版本记录（可回退）。
-/// </summary>
+//工具执行层
 public sealed class Harness
 {
     private const int MaxReadBytes = 131072;
@@ -66,6 +59,7 @@ public sealed class Harness
         _store = store;
     }
 
+    //按工具名分发
     public async Task<HarnessResult> ExecuteAsync(AgentTask task, CancellationToken ct = default)
     {
         var args = task.Rule.NormalizedArgs;
@@ -84,17 +78,7 @@ public sealed class Harness
                 "update_record" => await UpdateRecordAsync(task, args).ConfigureAwait(false),
                 "delete_record" => await DeleteRecordAsync(task, args).ConfigureAwait(false),
                 "send_notice" => await SendNoticeAsync(task, args).ConfigureAwait(false),
-                // ---- 甲方 / 乙方 对接业务 ----
-                "my_client" => await MyClientAsync(task, args).ConfigureAwait(false),
-                "create_client_profile" => await CreateClientProfileAsync(task, args).ConfigureAwait(false),
-                "update_client_profile" => await UpdateDatasetFieldAsync(task, args, "customers", "客户档案").ConfigureAwait(false),
-                "assign_client_owner" => await AssignClientOwnerAsync(task, args).ConfigureAwait(false),
-                "search_clients" => await SearchClientsAsync(task, args).ConfigureAwait(false),
-                "get_client_detail" => await GetClientDetailAsync(task, args).ConfigureAwait(false),
-                "submit_requirement" => await SubmitRequirementAsync(task, args).ConfigureAwait(false),
-                "my_requirements" => await MyRequirementsAsync(task, args).ConfigureAwait(false),
-                "update_requirement" => await UpdateDatasetFieldAsync(task, args, "requirements", "需求单").ConfigureAwait(false),
-                // ---- 检索与统计（AI 多步干活的"眼睛"） ----
+                //检索与统计
                 "search_files" => await SearchFilesAsync(task, args).ConfigureAwait(false),
                 "read_files" => await ReadFilesAsync(task, args).ConfigureAwait(false),
                 "rename_file" => await RenameFileAsync(task, args).ConfigureAwait(false),
@@ -107,7 +91,6 @@ public sealed class Harness
                 "a_task_list" => await AdminTaskListAsync(task, args).ConfigureAwait(false),
                 "count_records" => await CountRecordsAsync(task, args).ConfigureAwait(false),
                 "list_users" => await ListUsersAsync(task, args).ConfigureAwait(false),
-                "find_client" => await FindClientAsync(task, args).ConfigureAwait(false),
                 "my_profile" => await ProfileAsync(task).ConfigureAwait(false),
                 "my_tasks" => new HarnessResult { Ok = true, Summary = "任务列表由任务服务直接返回", Data = null },
                 _ => Fail("该工具由上层服务处理，未接入 Harness"),
@@ -121,8 +104,9 @@ public sealed class Harness
         }
     }
 
-    // ------------------------------------------------------------------ 只读工具
+    //只读工具
 
+    //列目录内容
     private HarnessResult ListFiles(AgentTask task, Dictionary<string, string> args)
     {
         var scope = args.GetValueOrDefault("scope") ?? "private";
@@ -165,6 +149,7 @@ public sealed class Harness
         };
     }
 
+    //读文件
     private async Task<HarnessResult> ReadFileAsync(AgentTask task, Dictionary<string, string> args)
     {
         var scope = args.GetValueOrDefault("scope") ?? "private";
@@ -174,7 +159,7 @@ public sealed class Harness
         var info = new FileInfo(resolved.FullPath);
         if (!info.Exists)
         {
-            // 找不到文件时给"最相近的候选"，而不是只回一句"不存在"（用户往往只是记不准名字）
+            //给相近文件名提示
             var dir = Path.GetDirectoryName(resolved.FullPath);
             var candidates = new List<string>();
             if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
@@ -211,6 +196,7 @@ public sealed class Harness
         };
     }
 
+    //查业务数据
     private async Task<HarnessResult> QueryAsync(AgentTask task, Dictionary<string, string> args)
     {
         var (ok, error, rows, query) = await _datasets.QueryAsync(
@@ -229,6 +215,7 @@ public sealed class Harness
         };
     }
 
+    //看我的资料
     private async Task<HarnessResult> ProfileAsync(AgentTask task)
     {
         var user = await _users.FindByIdAsync(task.UserId).ConfigureAwait(false);
@@ -250,8 +237,9 @@ public sealed class Harness
         };
     }
 
-    // ------------------------------------------------------------------ 写操作（全部先快照后执行）
+    //写操作（先落快照）
 
+    //写文件
     private async Task<HarnessResult> WriteFileAsync(AgentTask task, Dictionary<string, string> args)
     {
         var scope = args.GetValueOrDefault("scope") ?? "private";
@@ -304,6 +292,7 @@ public sealed class Harness
         };
     }
 
+    //删文件
     private async Task<HarnessResult> DeleteFileAsync(AgentTask task, Dictionary<string, string> args)
     {
         var scope = args.GetValueOrDefault("scope") ?? "private";
@@ -335,6 +324,7 @@ public sealed class Harness
         };
     }
 
+    //改记录字段
     private async Task<HarnessResult> UpdateRecordAsync(AgentTask task, Dictionary<string, string> args)
     {
         var dataset = args.GetValueOrDefault("dataset") ?? "";
@@ -377,6 +367,7 @@ public sealed class Harness
         };
     }
 
+    //删记录
     private async Task<HarnessResult> DeleteRecordAsync(AgentTask task, Dictionary<string, string> args)
     {
         var dataset = args.GetValueOrDefault("dataset") ?? "";
@@ -414,6 +405,7 @@ public sealed class Harness
         };
     }
 
+    //发通知
     private async Task<HarnessResult> SendNoticeAsync(AgentTask task, Dictionary<string, string> args)
     {
         var to = args.GetValueOrDefault("to") ?? "self";
@@ -448,258 +440,29 @@ public sealed class Harness
         };
     }
 
-    // ------------------------------------------------------------------ 甲方 / 乙方 对接业务
 
-    /// <summary>「我司档案」：只读返回与自己账号绑定的客户档案 + 关联需求单。</summary>
-    private async Task<HarnessResult> MyClientAsync(AgentTask task, Dictionary<string, string> args)
-    {
-        var clientId = args.GetValueOrDefault("client_id") ?? "";
-        var client = string.IsNullOrWhiteSpace(clientId)
-            ? await _datasets.FindByFieldAsync("customers", "account_user_id", task.UserId).ConfigureAwait(false)
-            : await _datasets.FindRowAsync("customers", clientId).ConfigureAwait(false);
 
-        if (client is null) return Fail("未找到与你账号绑定的甲方档案");
 
-        var requirements = await _datasets.ListByFieldAsync("requirements", "customer_id", Get(client, "id"), 20).ConfigureAwait(false);
 
-        return new HarnessResult
-        {
-            Ok = true,
-            Summary = $"我司档案：{Get(client, "name")}（{Get(client, "id")}，{Get(client, "status")}），关联需求单 {requirements.Count} 条",
-            Data = new { client, requirements },
-        };
-    }
 
-    /// <summary>甲方建档：主键与账号绑定都由服务端生成，客户端无法指定。</summary>
-    private async Task<HarnessResult> CreateClientProfileAsync(AgentTask task, Dictionary<string, string> args)
-    {
-        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["name"] = args.GetValueOrDefault("name") ?? "",
-            ["contact"] = args.GetValueOrDefault("contact") ?? "",
-            ["phone"] = args.GetValueOrDefault("phone") ?? "",
-            ["industry"] = args.GetValueOrDefault("industry") ?? "其它",
-            ["requirement"] = args.GetValueOrDefault("requirement") ?? "",
-            ["level"] = "普通",
-            ["status"] = "潜在",
-            ["owner"] = "",
-            ["remark"] = "",
-        };
 
-        var (ok, error, id) = await _datasets.CreateRowAsync("customers", values).ConfigureAwait(false);
-        if (!ok) return Fail(error);
 
-        // 服务端完成"账号 ↔ 档案"绑定（只读字段，客户端与 AI 都无法改写）
-        await _datasets.SetFieldServerSideAsync("customers", id, "account_user_id", task.UserId).ConfigureAwait(false);
-        await _datasets.SetFieldServerSideAsync("customers", id, "updated_at", DateTime.UtcNow.ToString("yyyy-MM-dd")).ConfigureAwait(false);
 
-        var created = await _datasets.FindRowAsync("customers", id).ConfigureAwait(false);
-        var json = AppJson.Serialize(created ?? values, disk: true);
 
-        var version = await _versions.RecordAsync(task.Id, task.UserId, task.UserName, "dataset", "create",
-            $"customers/{id}", null, Encoding.UTF8.GetBytes(json),
-            AppJson.Serialize(new UndoLog { Kind = "dataset", Dataset = "customers", Id = id, Inserted = true }))
-            .ConfigureAwait(false);
-
-        return new HarnessResult
-        {
-            Ok = true,
-            Summary = $"建档完成：{values["name"]}（客户编号 {id}），已与你的账号绑定",
-            Data = new { clientId = id, client = created, reverseNote = $"如为误建，可回退删除 {id}" },
-            VersionIds = { version.Id },
-        };
-    }
-
-    /// <summary>客户档案 / 需求单的字段修改（同构）：先取前像，再改，再落版本记录。</summary>
-    private async Task<HarnessResult> UpdateDatasetFieldAsync(AgentTask task, Dictionary<string, string> args,
-        string dataset, string label)
-    {
-        var id = (args.GetValueOrDefault("client_id") ?? args.GetValueOrDefault("id") ?? "").Trim();
-        var field = args.GetValueOrDefault("field") ?? "";
-        var value = args.GetValueOrDefault("value") ?? "";
-        if (id.Length == 0 || field.Length == 0) return Fail($"{label}编号或字段名为空");
-
-        var before = await _datasets.FindRowAsync(dataset, id).ConfigureAwait(false);
-        if (before is null) return Fail($"{label}不存在：{id}");
-
-        var (ok, error, oldValue, rowNow) = await _datasets.UpdateFieldAsync(dataset, id, field, value).ConfigureAwait(false);
-        if (!ok) return Fail(error);
-
-        var undo = AppJson.Serialize(new UndoLog
-        {
-            Kind = "dataset",
-            Dataset = dataset,
-            Id = id,
-            Field = field,
-            OldValue = oldValue,
-            RowJson = AppJson.Serialize(before, disk: true),
-        });
-
-        var version = await _versions.RecordAsync(task.Id, task.UserId, task.UserName, "dataset", "update",
-            $"{dataset}/{id}", Encoding.UTF8.GetBytes(AppJson.Serialize(before, disk: true)),
-            Encoding.UTF8.GetBytes(AppJson.Serialize(rowNow ?? before, disk: true)), undo).ConfigureAwait(false);
-
-        return new HarnessResult
-        {
-            Ok = true,
-            Summary = $"已修改{label} {id} 的 {field}：{(oldValue.Length == 0 ? "（空）" : oldValue)} → {value}",
-            Data = new
-            {
-                dataset,
-                id,
-                field,
-                oldValue,
-                newValue = value,
-                reverseSql = $"UPDATE {dataset} SET {field} = '{oldValue}' WHERE id = '{id}';  -- 回退用（仅记录，不拼接执行）",
-                diff = version.DiffText,
-            },
-            VersionIds = { version.Id },
-        };
-    }
-
-    /// <summary>指派客户负责人（本质是 customers.owner 的受控修改，走同一条快照/回退通道）。</summary>
-    private async Task<HarnessResult> AssignClientOwnerAsync(AgentTask task, Dictionary<string, string> args)
-    {
-        var clientId = args.GetValueOrDefault("client_id") ?? "";
-        var owner = args.GetValueOrDefault("owner") ?? "";
-
-        var before = await _datasets.FindRowAsync("customers", clientId).ConfigureAwait(false);
-        if (before is null) return Fail($"客户档案不存在：{clientId}");
-
-        var (ok, error, oldValue, rowNow) = await _datasets.UpdateFieldAsync("customers", clientId, "owner", owner).ConfigureAwait(false);
-        if (!ok) return Fail(error);
-
-        var undo = AppJson.Serialize(new UndoLog
-        {
-            Kind = "dataset",
-            Dataset = "customers",
-            Id = clientId,
-            Field = "owner",
-            OldValue = oldValue,
-            RowJson = AppJson.Serialize(before, disk: true),
-        });
-
-        var version = await _versions.RecordAsync(task.Id, task.UserId, task.UserName, "dataset", "assign-owner",
-            $"customers/{clientId}", Encoding.UTF8.GetBytes(AppJson.Serialize(before, disk: true)),
-            Encoding.UTF8.GetBytes(AppJson.Serialize(rowNow ?? before, disk: true)), undo).ConfigureAwait(false);
-
-        return new HarnessResult
-        {
-            Ok = true,
-            Summary = $"已把客户 {clientId}（{Get(before, "name")}）的负责人从 {(oldValue.Length == 0 ? "（未指派）" : oldValue)} 变更为 {owner}",
-            Data = new { clientId, owner, oldOwner = oldValue, diff = version.DiffText },
-            VersionIds = { version.Id },
-        };
-    }
-
-    private async Task<HarnessResult> SearchClientsAsync(AgentTask task, Dictionary<string, string> args)
-    {
-        var (ok, error, rows, query) = await _datasets.QueryAsync("customers",
-            args.GetValueOrDefault("field"), args.GetValueOrDefault("op"), args.GetValueOrDefault("value"),
-            int.TryParse(args.GetValueOrDefault("limit"), out var limit) ? limit : 20).ConfigureAwait(false);
-
-        if (!ok) return Fail(error);
-
-        return new HarnessResult
-        {
-            Ok = true,
-            Summary = $"客户档案查询命中 {rows.Count} 条",
-            Data = new { query, columns = rows.Count > 0 ? rows[0].Keys.ToList() : new List<string>(), rows },
-        };
-    }
-
-    private async Task<HarnessResult> GetClientDetailAsync(AgentTask task, Dictionary<string, string> args)
-    {
-        var clientId = args.GetValueOrDefault("client_id") ?? "";
-        var client = await _datasets.FindRowAsync("customers", clientId).ConfigureAwait(false);
-        if (client is null) return Fail($"客户档案不存在：{clientId}");
-
-        var requirements = await _datasets.ListByFieldAsync("requirements", "customer_id", clientId, 20).ConfigureAwait(false);
-
-        return new HarnessResult
-        {
-            Ok = true,
-            Summary = $"客户 {clientId}（{Get(client, "name")}）详情：需求单 {requirements.Count} 条",
-            Data = new { client, requirements },
-        };
-    }
-
-    private async Task<HarnessResult> SubmitRequirementAsync(AgentTask task, Dictionary<string, string> args)
-    {
-        var customerId = args.GetValueOrDefault("customer_id") ?? "";
-        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["customer_id"] = customerId,
-            ["title"] = args.GetValueOrDefault("title") ?? "",
-            ["detail"] = args.GetValueOrDefault("detail") ?? "",
-            ["budget"] = args.GetValueOrDefault("budget") ?? "",
-            ["expect_date"] = args.GetValueOrDefault("expect_date") ?? "",
-            ["status"] = "待评估",
-            ["owner"] = "",
-        };
-
-        var (ok, error, id) = await _datasets.CreateRowAsync("requirements", values).ConfigureAwait(false);
-        if (!ok) return Fail(error);
-
-        // 提交人、所属甲方、时间戳都由服务端盖章（这几个都是只读字段：
-        // 甲方不能自己指定 customer_id，否则就能把需求挂到别人公司名下）
-        await _datasets.SetFieldServerSideAsync("requirements", id, "customer_id", customerId).ConfigureAwait(false);
-        await _datasets.SetFieldServerSideAsync("requirements", id, "created_by", task.UserName).ConfigureAwait(false);
-        await _datasets.SetFieldServerSideAsync("requirements", id, "created_at", DateTime.UtcNow.ToString("yyyy-MM-dd")).ConfigureAwait(false);
-        await _datasets.SetFieldServerSideAsync("requirements", id, "updated_at", DateTime.UtcNow.ToString("yyyy-MM-dd")).ConfigureAwait(false);
-
-        var created = await _datasets.FindRowAsync("requirements", id).ConfigureAwait(false);
-        var version = await _versions.RecordAsync(task.Id, task.UserId, task.UserName, "dataset", "create",
-            $"requirements/{id}", null, Encoding.UTF8.GetBytes(AppJson.Serialize(created ?? values, disk: true)),
-            AppJson.Serialize(new UndoLog { Kind = "dataset", Dataset = "requirements", Id = id, Inserted = true }))
-            .ConfigureAwait(false);
-
-        return new HarnessResult
-        {
-            Ok = true,
-            Summary = $"需求单已创建：{id}「{values["title"]}」（甲方 {customerId}，状态 待评估）",
-            Data = new { requirementId = id, requirement = created },
-            VersionIds = { version.Id },
-        };
-    }
-
-    private async Task<HarnessResult> MyRequirementsAsync(AgentTask task, Dictionary<string, string> args)
-    {
-        var clientId = args.GetValueOrDefault("client_id") ?? "";
-        if (clientId.Length == 0)
-        {
-            var mine = await _datasets.FindByFieldAsync("customers", "account_user_id", task.UserId).ConfigureAwait(false);
-            if (mine is null) return Fail("未找到与你账号绑定的甲方档案");
-            clientId = Get(mine, "id");
-        }
-
-        var rows = await _datasets.ListByFieldAsync("requirements", "customer_id", clientId, 20).ConfigureAwait(false);
-
-        return new HarnessResult
-        {
-            Ok = true,
-            Summary = $"我司需求单共 {rows.Count} 条",
-            Data = new { customerId = clientId, columns = rows.Count > 0 ? rows[0].Keys.ToList() : new List<string>(), rows },
-        };
-    }
-
+    //取字段值
     private static string Get(Dictionary<string, string> row, string field)
     {
         var kv = row.FirstOrDefault(x => string.Equals(x.Key, field, StringComparison.OrdinalIgnoreCase));
         return kv.Key is null ? "" : kv.Value;
     }
 
-    // ------------------------------------------------------------------ 检索与统计
+    //检索与统计
 
-    /// <summary>
-    /// 文件检索：按文件名关键字 / 扩展名 / 文件内容查找。
-    /// 这是"不用记文件名"的关键——用户说"读日报"，AI 先搜"日报"拿到真实路径，再读。
-    /// 保护措施：限制扫描文件数、单文件读取上限、跳过二进制与符号链接。
-    /// </summary>
+    //按名/后缀/内容检索
     private async Task<HarnessResult> SearchFilesAsync(AgentTask task, Dictionary<string, string> args)
     {
         const int maxScanned = 800;
-        const int maxContentBytes = 262144;   // 内容搜索时单文件最多读 256KB
+        const int maxContentBytes = 262144;   //单文件最多读 256KB
         const int maxPreviewPerFile = 3;
 
         var scope = args.GetValueOrDefault("scope") ?? "private";
@@ -720,7 +483,7 @@ public sealed class Harness
             if (++scanned > maxScanned) break;
 
             var info = new FileInfo(file);
-            if (info.LinkTarget is not null) continue;                        // 忽略符号链接
+            if (info.LinkTarget is not null) continue;                        //跳过软链接
             if (ext.Length > 0 && !info.Extension.TrimStart('.').Equals(ext, StringComparison.OrdinalIgnoreCase)) continue;
             if (keyword.Length > 0 && !info.Name.Contains(keyword, StringComparison.OrdinalIgnoreCase)) continue;
 
@@ -732,7 +495,7 @@ public sealed class Harness
                 byte[] bytes;
                 try { bytes = await File.ReadAllBytesAsync(file).ConfigureAwait(false); }
                 catch { continue; }
-                if (bytes.Contains((byte)0)) continue;                        // 二进制跳过
+                if (bytes.Contains((byte)0)) continue;                        //跳过二进制
 
                 var text = Encoding.UTF8.GetString(bytes);
                 if (!text.Contains(content, StringComparison.OrdinalIgnoreCase)) continue;
@@ -768,7 +531,7 @@ public sealed class Harness
         };
     }
 
-    /// <summary>批量读取（最多 5 个）：需要"看全部文件"时一次读完，避免一轮一个来回。</summary>
+    //批量读文件
     private async Task<HarnessResult> ReadFilesAsync(AgentTask task, Dictionary<string, string> args)
     {
         const int maxPerFileChars = 8000;
@@ -826,7 +589,7 @@ public sealed class Harness
         };
     }
 
-    /// <summary>业务数据统计：回答"有多少客户/需求单"。甲方只看得到本公司，员工/管理员看全量。</summary>
+    //业务数据统计
     private async Task<HarnessResult> CountRecordsAsync(AgentTask task, Dictionary<string, string> args)
     {
         var dataset = (args.GetValueOrDefault("dataset") ?? "").Trim().ToLowerInvariant();
@@ -867,7 +630,7 @@ public sealed class Harness
         };
     }
 
-    /// <summary>账号名册（管理员专属，只读）：返回数量、角色分布与脱敏后的账号列表——**不含任何口令字段**。</summary>
+    //账号名册（管理员）
     private async Task<HarnessResult> ListUsersAsync(AgentTask task, Dictionary<string, string> args)
     {
         var keyword = (args.GetValueOrDefault("keyword") ?? "").Trim();
@@ -920,43 +683,10 @@ public sealed class Harness
         };
     }
 
-    /// <summary>按关键字找客户（返回候选，供 AI 或用户确认），避免让人背编号。</summary>
-    private async Task<HarnessResult> FindClientAsync(AgentTask task, Dictionary<string, string> args)
-    {
-        var keyword = (args.GetValueOrDefault("keyword") ?? "").Trim();
-        var limit = int.TryParse(args.GetValueOrDefault("limit"), out var parsedLimit) ? Math.Clamp(parsedLimit, 1, 50) : 10;
 
-        var rows = await _datasets.FindClientsByKeywordAsync(keyword, limit).ConfigureAwait(false);
+    //文件管理
 
-        return new HarnessResult
-        {
-            Ok = true,
-            Summary = rows.Count switch
-            {
-                0 => $"没有找到与「{keyword}」匹配的客户",
-                1 => $"找到 1 个客户：{Get(rows[0], "id")} {Get(rows[0], "name")}",
-                _ => $"找到 {rows.Count} 个匹配「{keyword}」的客户，请确认是哪一个",
-            },
-            Data = new
-            {
-                keyword,
-                count = rows.Count,
-                candidates = rows.Select(r => new
-                {
-                    id = Get(r, "id"),
-                    name = Get(r, "name"),
-                    contact = Get(r, "contact"),
-                    level = Get(r, "level"),
-                    status = Get(r, "status"),
-                    owner = Get(r, "owner"),
-                }).ToList(),
-            },
-        };
-    }
-
-    // ------------------------------------------------------------------ 文件管理（改名 / 建目录 / 文件信息）
-
-    /// <summary>同目录改名（含改后缀）。改名前后都过路径守卫；改名后要能回退（删掉新名、恢复旧名）。</summary>
+    //同目录改名
     private async Task<HarnessResult> RenameFileAsync(AgentTask task, Dictionary<string, string> args)
     {
         var scope = args.GetValueOrDefault("scope") ?? "private";
@@ -968,7 +698,7 @@ public sealed class Harness
         var parent = Path.GetDirectoryName(resolved.Relative)?.Replace('\\', '/') ?? "";
         var newRelative = parent.Length > 0 ? parent + "/" + newName : newName;
 
-        // 目标路径同样必须落在白名单内（防 new_name 里夹带路径穿越）
+        //新路径也要过守卫
         var target = _paths.Resolve(task.UserId, scope, newRelative);
         if (!target.Ok) return Fail(target.Error);
         if (target.Relative == resolved.Relative) return Fail("新旧文件名相同");
@@ -1000,6 +730,7 @@ public sealed class Harness
         };
     }
 
+    //新建目录
     private Task<HarnessResult> CreateFolderAsync(AgentTask task, Dictionary<string, string> args)
     {
         var scope = args.GetValueOrDefault("scope") ?? "private";
@@ -1017,6 +748,7 @@ public sealed class Harness
         });
     }
 
+    //取文件信息
     private HarnessResult FileInfoOf(AgentTask task, Dictionary<string, string> args)
     {
         var scope = args.GetValueOrDefault("scope") ?? "private";
@@ -1070,7 +802,7 @@ public sealed class Harness
         };
     }
 
-    /// <summary>「我的可用区域与权限」：把"我能干什么"讲清楚，避免用户"问一句"被当成"越权访问"。</summary>
+    //我的可用区域
     private async Task<HarnessResult> MyWorkspaceAsync(AgentTask task)
     {
         var role = task.UserRole;
@@ -1131,6 +863,7 @@ public sealed class Harness
         };
     }
 
+    //看我的通知
     private async Task<HarnessResult> MyNotificationsAsync(AgentTask task, Dictionary<string, string> args)
     {
         var limit = int.TryParse(args.GetValueOrDefault("limit"), out var parsed) ? Math.Clamp(parsed, 1, 50) : 10;
@@ -1155,7 +888,7 @@ public sealed class Harness
         };
     }
 
-    /// <summary>撤回自己的待审批申请：不执行任何动作，只是取消排队（低风险，可自动执行）。</summary>
+    //撤回自己的申请
     private async Task<HarnessResult> CancelMyTaskAsync(AgentTask task, Dictionary<string, string> args)
     {
         var requestedId = (args.GetValueOrDefault("task_id") ?? "").Trim();
@@ -1198,12 +931,9 @@ public sealed class Harness
         return Fail(cancelled.Message);
     }
 
-    // ------------------------------------------------------------------ 管理端只读分析（使用情况 / 任务清单）
+    //管理端只读分析
 
-    /// <summary>
-    /// 管理端"使用情况汇总"：按账号聚合最近 N 天的任务与拦截情况，并附 AI 调用次数。
-    /// 这是给管理员回答"谁在用什么/最近有没有异常操作"的工具——比反复检索审计日志高效得多。
-    /// </summary>
+    //账号使用情况汇总
     private async Task<HarnessResult> AdminActivitySummaryAsync(AgentTask task, Dictionary<string, string> args)
     {
         var userFilter = (args.GetValueOrDefault("user") ?? "").Trim();
@@ -1278,6 +1008,7 @@ public sealed class Harness
         };
     }
 
+    //任务清单
     private async Task<HarnessResult> AdminTaskListAsync(AgentTask task, Dictionary<string, string> args)
     {
         var status = (args.GetValueOrDefault("status") ?? "").Trim();
@@ -1324,12 +1055,9 @@ public sealed class Harness
         };
     }
 
-    // ------------------------------------------------------------------ 回退（一键撤销）
+    //一键回退
 
-    /// <summary>
-    /// 执行回退。回退本身也是"一次可回退的操作"：会先把当前状态再快照一份，
-    /// 因此管理员可以撤销一次误回退（回退的回退）。
-    /// </summary>
+    //执行回退
     public async Task<(bool Ok, string Message, string NewVersionId, object? Data)> RollbackAsync(
         VersionRecord version, string actorId, string actorName, string actorRole, string revertTaskId)
     {
@@ -1355,7 +1083,7 @@ public sealed class Harness
                     if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
                     await File.WriteAllBytesAsync(resolved.FullPath, restore).ConfigureAwait(false);
 
-                    // 改名操作的回退：恢复旧文件名后，把新名字那份删掉（否则会留下一个重复文件）
+                    //回退改名要删新名
                     if (!string.IsNullOrEmpty(undo.RenamedTo))
                     {
                         var renamed = _paths.Resolve(version.UserId, undo.Scope, undo.RenamedTo);
@@ -1388,7 +1116,7 @@ public sealed class Harness
             {
                 if (!string.IsNullOrEmpty(undo.RowJson) && string.IsNullOrEmpty(undo.Field))
                 {
-                    // 原本是删除 → 回退 = 重新插入整行
+                    //回退删除：整行插回
                     var (ok, error) = await _datasets.InsertRowAsync(undo.Dataset, undo.RowJson).ConfigureAwait(false);
                     if (!ok) return (false, error, "", null);
 
@@ -1399,7 +1127,7 @@ public sealed class Harness
 
                 if (!string.IsNullOrEmpty(undo.Field))
                 {
-                    // 原本是更新 → 回退 = 恢复旧值
+                    //回退更新：恢复旧值
                     var (ok, error) = await _datasets.RestoreFieldsAsync(undo.Dataset, undo.Id,
                         new Dictionary<string, string> { [undo.Field] = undo.OldValue }).ConfigureAwait(false);
                     if (!ok) return (false, error, "", null);
@@ -1436,6 +1164,7 @@ public sealed class Harness
         }
     }
 
+    //记数据回退
     private async Task<string> RecordDatasetUndoAsync(string revertTaskId, VersionRecord version, string actorName,
         string operation, UndoLog undo)
     {
@@ -1459,6 +1188,7 @@ public sealed class Harness
         return nv.Id;
     }
 
+    //标记已回退
     private async Task MarkRevertedAsync(string versionId, string actorName, string revertTaskId)
         => await _versions.UpdateAsync(versionId, v =>
         {
@@ -1468,6 +1198,7 @@ public sealed class Harness
             v.RevertTaskId = revertTaskId;
         }).ConfigureAwait(false);
 
+    //拼接字节
     private static byte[] Concat(byte[]? first, byte[] second)
     {
         if (first is null) return second;
@@ -1477,5 +1208,6 @@ public sealed class Harness
         return result;
     }
 
+    //返回失败
     private static HarnessResult Fail(string message) => new() { Ok = false, Summary = message };
 }

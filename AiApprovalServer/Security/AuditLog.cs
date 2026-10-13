@@ -3,16 +3,7 @@ using AiApproval.Core;
 
 namespace AiApproval.Security;
 
-/// <summary>
-/// 审计日志：JSONL 追加写 + 逐条哈希链。
-///
-/// 为什么用哈希链：运维/攻击者可以删改文件里的某一行，但无法在不破坏后续所有 Hash 的情况下
-/// 伪造历史。后台"审计链校验"按钮会重新计算全链并定位第一个断链位置。
-///
-/// 多进程安全：每次写之前都会**重新读一次文件尾部**校准 (Seq, 上一个 Hash)，并且追加时对文件加独占锁。
-/// 否则两个实例各自持有内存里的链头时写同一个文件，会写出重复序号、把链写断
-/// （这是实测踩到的坑：审计校验报 "序号断裂：期望 42，实际 41"）。
-/// </summary>
+//审计日志：JSONL 追加 + 哈希链
 public sealed class AuditLog
 {
     private readonly JsonStore _store;
@@ -36,7 +27,7 @@ public sealed class AuditLog
         _initialized = true;
     }
 
-    /// <summary>从文件尾部校准链头（文件长度没变就跳过，避免每条都读全文件）。</summary>
+    //从文件尾部校准链头
     private async Task RefreshTailAsync(bool force)
     {
         try
@@ -70,10 +61,11 @@ public sealed class AuditLog
         }
         catch
         {
-            // 校准失败不阻断写入：宁可写出一条可能断链的记录，也不要让审计整体失效
+            //校准失败不阻断写入
         }
     }
 
+    //写一条审计
     public async Task<AuditEntry> WriteAsync(AuditEntry entry)
     {
         await _gate.WaitAsync().ConfigureAwait(false);
@@ -97,7 +89,7 @@ public sealed class AuditLog
         finally { _gate.Release(); }
     }
 
-    /// <summary>独占追加：跨进程串行化，避免多实例同时写导致序号重复与断链。</summary>
+    //独占追加，跨进程串行化
     private async Task AppendExclusiveAsync(string line)
     {
         var directory = Path.GetDirectoryName(_path);
@@ -115,7 +107,7 @@ public sealed class AuditLog
             }
             catch (IOException) when (attempt < 20)
             {
-                // 另一个实例正在写：退避重试
+                //别的实例在写，退避重试
                 await Task.Delay(30 * attempt).ConfigureAwait(false);
             }
         }
@@ -135,6 +127,7 @@ public sealed class AuditLog
             Detail = Truncate(detail, 800),
         });
 
+    //读审计，倒序分页
     public async Task<List<AuditEntry>> ReadAsync(int limit = 200, int offset = 0, string? actionFilter = null, string? actorFilter = null)
     {
         var lines = await _store.ReadLinesAsync(StoreNames.Audit).ConfigureAwait(false);
@@ -154,13 +147,14 @@ public sealed class AuditLog
         return query.Skip(Math.Max(0, offset)).Take(Math.Clamp(limit, 1, 500)).ToList();
     }
 
+    //审计条数
     public async Task<int> CountAsync()
     {
         var lines = await _store.ReadLinesAsync(StoreNames.Audit).ConfigureAwait(false);
         return lines.Count;
     }
 
-    /// <summary>全链校验：返回是否完整、检查条数与首个断链位置。</summary>
+    //全链校验，定位首个断链
     public async Task<(bool Ok, int Checked, long BrokenAt, string Message)> VerifyChainAsync()
     {
         var lines = await _store.ReadLinesAsync(StoreNames.Audit).ConfigureAwait(false);
@@ -190,7 +184,7 @@ public sealed class AuditLog
         return (true, lines.Count, 0, $"审计链完整，共校验 {lines.Count} 条记录");
     }
 
-    /// <summary>链哈希计算：字段顺序固定、显式分隔，避免不同字段拼接产生歧义。</summary>
+    //链哈希，字段顺序固定
     private static string ComputeHash(AuditEntry e)
     {
         var sb = new StringBuilder();

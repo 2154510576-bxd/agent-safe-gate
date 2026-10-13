@@ -4,31 +4,22 @@ using AiApproval.Services;
 
 namespace AiApproval.Security;
 
-/// <summary>请求身份上下文（由中间件解析后放入 HttpContext.Items）。</summary>
+//请求身份上下文
 public sealed class RequestIdentity
 {
     public required UserRecord User { get; init; }
     public string Ip { get; init; } = "";
-    /// <summary>请求签名密钥（登录时随令牌下发；状态变更请求必须用它签名）</summary>
+    //请求签名密钥
     public string SignKey { get; init; } = "";
     public string Token { get; init; } = "";
 
-    public bool IsAdmin => User.Role == Roles.Admin;
-    public bool IsStaffOrAbove => User.Role is Roles.Staff or Roles.Admin;
+    //是否管理侧
+    public bool IsAdmin => Roles.IsAdminSide(User.Role);
+    //是否财务侧
+    public bool IsStaffOrAbove => Roles.IsFinanceSide(User.Role);
 }
 
-/// <summary>
-/// 安全中间件：把"能挡在业务代码之前的事"全部挡在业务代码之前。
-/// 处理顺序（顺序本身就是防线设计）：
-///   1) 安全响应头（无论如何都要带上）
-///   2) IP 封禁检查
-///   3) 蜜罐路径探测
-///   4) WAF 特征扫描（路径/查询串/关键头）
-///   5) 请求体缓冲（带硬上限，防内存打爆）
-///   6) 跨站来源校验（Origin/Referer）
-///   7) 令牌校验 + 请求签名 / 时间戳 / 一次性随机数（Anti-Replay）
-///   8) 未捕获异常兜底：只回统一错误，绝不回栈信息
-/// </summary>
+//安全中间件：业务之前的防线
 public sealed class SecurityMiddleware
 {
     public const string IdentityKey = "ai_identity";
@@ -38,7 +29,7 @@ public sealed class SecurityMiddleware
     {
         "/api/public/health",
         "/api/auth/login",
-        "/api/auth/register",
+        //注册已不是公开接口
     };
 
     private readonly RequestDelegate _next;
@@ -78,7 +69,7 @@ public sealed class SecurityMiddleware
             return;
         }
 
-        // 蜜罐：正常用户不会访问这些路径
+        //蜜罐路径
         if (Honeypot.IsDecoy(path, out var decoyLabel))
         {
             await HandleDecoyAsync(context, ip, path, decoyLabel).ConfigureAwait(false);
@@ -87,7 +78,7 @@ public sealed class SecurityMiddleware
 
         if (path.Equals("/robots.txt", StringComparison.OrdinalIgnoreCase))
         {
-            // 读 robots.txt 多为扫描器行为：记录但不拦截
+            //读 robots.txt 只记录不拦截
             await _audit.WriteAsync("", "", "", ip, "recon.robots", "/robots.txt", "OBSERVED", "读取 robots.txt");
             context.Response.ContentType = "text/plain; charset=utf-8";
             await context.Response.WriteAsync(Honeypot.RobotsTxt()).ConfigureAwait(false);
@@ -169,7 +160,7 @@ public sealed class SecurityMiddleware
                     return;
                 }
 
-                // 越权访问后台接口：非管理员访问 /api/admin/* 直接拒绝并记分（含"爆破后台"信号）
+                //越权记分 weight=3
                 if (path.StartsWith("/api/admin/", StringComparison.OrdinalIgnoreCase) && !identity.IsAdmin)
                 {
                     var banned = _guard.Strike(ip, $"{identity.User.UserName} 越权访问管理接口", weight: 3, waf: true);
@@ -190,11 +181,11 @@ public sealed class SecurityMiddleware
         }
         catch (OperationCanceledException)
         {
-            // 客户端断开：不写错误响应
+            //客户端断开，不写响应
         }
         catch (Exception ex)
         {
-            // 只把细节写进服务端日志/审计，响应体保持"无信息量"
+            //细节只进日志，响应不泄露
             _logger.LogError(ex, "未处理异常 {Path}", path);
             await _audit.WriteAsync("", "", "", ip, "system.error", Truncate(path, 200), "ERROR",
                 ex.GetType().Name + ": " + Truncate(ex.Message, 300)).ConfigureAwait(false);
@@ -204,7 +195,7 @@ public sealed class SecurityMiddleware
         }
     }
 
-    // ------------------------------------------------------------------ 各步骤实现
+    //诱饵路径处理
 
     private async Task HandleDecoyAsync(HttpContext context, string ip, string path, string decoyLabel)
     {
@@ -212,7 +203,7 @@ public sealed class SecurityMiddleware
 
         if (isPost)
         {
-            // 往诱饵后台提交凭据 = 明确的攻击行为：直接封禁并留证
+            //向诱饵后台提交凭据，直接封禁
             _guard.Strike(ip, $"蜜罐后台提交凭据（{decoyLabel}）", weight: 3, honeypot: true);
             _guard.Ban(ip, "向蜜罐管理后台提交凭据", _cfg.Limits.BanMinutes);
             await _audit.WriteAsync("", "", "", ip, "honeypot.credential", Truncate(path, 120), "BANNED",
@@ -232,10 +223,11 @@ public sealed class SecurityMiddleware
             return;
         }
 
-        // 其它诱饵路径与普通 404 表现一致，不给攻击者任何"这里被特殊处理了"的反馈
+        //其它诱饵路径返回普通 404
         await WriteJsonAsync(context, 404, new { error = "未找到资源", code = "NOT_FOUND" }).ConfigureAwait(false);
     }
 
+    //缓冲请求体，带硬上限
     private async Task<byte[]?> BufferBodyAsync(HttpContext context)
     {
         if (!IsStateChanging(context)) return null;
@@ -259,13 +251,14 @@ public sealed class SecurityMiddleware
         }
 
         var bytes = ms.ToArray();
-        // 回填给后续处理器（业务代码照常读 body）
+        //回填 body 给后续处理器
         context.Request.Body = new MemoryStream(bytes);
         context.Request.ContentLength = bytes.Length;
         context.Items[RawBodyKey] = bytes;
         return bytes;
     }
 
+    //校验请求签名与时间戳
     private (bool Ok, string Reason) VerifySignature(HttpContext context, byte[]? body, string signKey, string userId)
     {
         if (string.IsNullOrEmpty(signKey)) return (false, "令牌缺少签名密钥，请重新登录");
@@ -302,23 +295,18 @@ public sealed class SecurityMiddleware
         return (true, "");
     }
 
+    //是否写操作
     private static bool IsStateChanging(HttpContext context)
         => HttpMethods.IsPost(context.Request.Method)
            || HttpMethods.IsPut(context.Request.Method)
            || HttpMethods.IsPatch(context.Request.Method)
            || HttpMethods.IsDelete(context.Request.Method);
 
-    /// <summary>
-    /// 跨站来源校验：浏览器发起的跨站写请求必然带 Origin。
-    /// 判定顺序：① `Security:TrustedOrigins` 里显式白名单 → 放行（反向代理终止 TLS 的场景）
-    ///           ② 与"协议+主机+端口"严格同源 → 放行
-    ///           ③ 其余一律拒绝（CSRF 双保险，主保险是"不用 Cookie 认证"）。
-    /// 白名单为空时行为与之前完全一致：只有严格同源才放行。
-    /// </summary>
+    //跨站来源校验（Origin）
     private bool IsSameOrigin(HttpContext context)
     {
         var origin = context.Request.Headers.Origin.ToString();
-        if (string.IsNullOrWhiteSpace(origin)) return true; // 非浏览器客户端（curl/脚本），由签名机制负责
+        if (string.IsNullOrWhiteSpace(origin)) return true; //非浏览器请求交给签名机制
 
         if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri)) return false;
 
@@ -330,6 +318,7 @@ public sealed class SecurityMiddleware
         return string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
     }
 
+    //取 Bearer 令牌
     private static string ReadBearer(HttpContext context)
     {
         var raw = context.Request.Headers.Authorization.ToString();
@@ -338,6 +327,7 @@ public sealed class SecurityMiddleware
         return raw.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ? raw[prefix.Length..].Trim() : "";
     }
 
+    //加安全响应头
     private void AddSecurityHeaders(HttpContext context)
     {
         var headers = context.Response.Headers;
@@ -347,7 +337,7 @@ public sealed class SecurityMiddleware
         headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=(), payment=(), usb=(), magnetometer=()";
         headers["Cross-Origin-Opener-Policy"] = "same-origin";
         headers["Cross-Origin-Resource-Policy"] = "same-origin";
-        headers["X-XSS-Protection"] = "0"; // 旧浏览器 XSS Auditor 自身存在信息泄露问题，显式关闭
+        headers["X-XSS-Protection"] = "0"; //显式关闭旧浏览器 XSS Auditor
         headers["Content-Security-Policy"] =
             "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
             "connect-src 'self'; font-src 'self'; media-src 'none'; object-src 'none'; frame-ancestors 'none'; " +
@@ -358,6 +348,7 @@ public sealed class SecurityMiddleware
             headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains";
     }
 
+    //回 JSON 响应
     private static async Task WriteJsonAsync(HttpContext context, int status, object payload)
     {
         if (context.Response.HasStarted) return;

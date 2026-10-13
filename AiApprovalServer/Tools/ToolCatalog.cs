@@ -3,7 +3,7 @@ using AiApproval.Core;
 
 namespace AiApproval.Tools;
 
-/// <summary>权限键（"权限组"就是权限键的集合，角色 → 权限键映射在 RolePermissions 中固定）。</summary>
+//权限键
 public static class Permissions
 {
     public const string FileRead = "file.read";
@@ -16,12 +16,11 @@ public static class Permissions
     public const string DataDelete = "data.delete";
     public const string NoticeSend = "notice.send";
     public const string AdminRead = "admin.read";
-    /// <summary>账号名册查询（管理员专属：非管理员连"有多少用户"都不该知道）</summary>
+    //账号名册查询
     public const string UserRead = "user.read";
-    // ---- 甲方/乙方对接业务（业务对接台）----
+    //对接业务权限
     public const string ClientRead = "client.read";
-    /// <summary>跨客户检索（员工专属）。刻意与 ClientRead 分开：甲方也能"读客户档案"（读自己的那条），
-    /// 但"按条件检索全部客户"是乙方能力，用同一个权限键会导致甲方越权拉全量客户名单。</summary>
+    //跨客户检索（员工专属）
     public const string ClientSearch = "client.search";
     public const string ClientWrite = "client.write";
     public const string ClientAssign = "client.assign";
@@ -49,36 +48,44 @@ public static class Permissions
         ReqRead => "查看需求单",
         ReqCreate => "提交需求单",
         ReqWrite => "维护需求单",
+        //报销系统权限键
+        Perm.AccountCreate => "创建账号（注册）",
+        Perm.AccountList => "查看账号列表",
+        Perm.AccountManage => "维护账号（改角色/停用/重置口令）",
+        Perm.AccountGrantAdmin => "授予或撤销管理员",
+        Perm.AccountDelete => "删除账号",
+        Perm.InvoiceReadSelf => "查询自己的报销单",
+        Perm.InvoiceReadAll => "查询全部报销单",
+        Perm.InvoiceSubmit => "提交报销单",
+        Perm.InvoiceReview => "审核报销单",
+        Perm.InvoiceUpdate => "修改报销单",
+        Perm.InvoiceDelete => "删除报销单",
+        Perm.LogRead => "查看操作日志",
+        Perm.LogRollback => "按日志回退操作",
         _ => key,
     };
 }
 
+//工具定义
 public sealed class ToolDefinition
 {
     public string Name { get; init; } = "";
     public string Title { get; init; } = "";
     public string Description { get; init; } = "";
-    /// <summary>静态风险等级（AI 只能提高，不能降低）</summary>
+    //静态风险等级
     public string RiskLevel { get; init; } = Risk.Low;
-    /// <summary>是否"固定"需要人工审批（与运行时升级条件叠加，取或）</summary>
+    //固定要人工审批
     public bool RequiresApproval { get; init; }
     public bool StateChanging { get; init; }
     public bool AdminOnly { get; init; }
     public string[] Permissions { get; init; } = Array.Empty<string>();
     public Dictionary<string, string> Params { get; init; } = new();
     public string[] RequiredParams { get; init; } = Array.Empty<string>();
-    /// <summary>允许出现在参数里的键（白名单，多余键一律拒绝）</summary>
+    //参数白名单
     public string[] AllowedParamNames { get; init; } = Array.Empty<string>();
 }
 
-/// <summary>
-/// 工具目录：定义"AI 能表达哪些动作"。
-///
-/// 设计要点：
-///   * 工具是**白名单**：目录里没有的动作，AI 说得再动听也无法执行（Harness 只认目录内的名字）；
-///   * 风险等级与"是否必须人工审批"由代码静态声明，AI 的建议只能往上加，不能往下减；
-///   * 每个工具显式列出参数白名单，未列出的参数直接拒绝（防"凭空多出一个参数"的走私）。
-/// </summary>
+//工具目录
 public static class ToolCatalog
 {
     public const int MaxFileContentChars = 8000;
@@ -139,8 +146,7 @@ public static class ToolCatalog
                           + "（是否审批由规则引擎按区域与可执行性判定，不在这里静态写死）。"
                           + "**系统不支持批量/整目录删除**：请一次指定一个文件。",
             RiskLevel = Risk.Medium,
-            // 注意：这里刻意不写 RequiresApproval=true —— 私人区普通文件的删除被允许直接执行（有快照），
-            // 只有"共享工作区 / 可执行文件"才由规则引擎提升为高风险 + 必须审批。
+            //审批由规则引擎按区域升级
             StateChanging = true,
             Permissions = new[] { Permissions.FileDelete },
             Params = new()
@@ -149,20 +155,19 @@ public static class ToolCatalog
                 ["path"] = "相对文件路径（必填；系统不支持批量/整目录删除）",
                 ["reason"] = "删除原因（建议填写，会展示给审批人）",
             },
-            // 刻意不把 path 放进 RequiredParams：这样"清空工作区"这类请求会走到规则引擎里
-            // 那条"不支持批量删除"的明确文案，而不是被泛化的"缺少必填参数"挡掉。
+            //故意不把 path 设为必填
             AllowedParamNames = new[] { "scope", "path", "reason" },
         },
         ["query_records"] = new ToolDefinition
         {
             Name = "query_records",
             Title = "查询业务数据",
-            Description = "查询业务数据集（只读）。dataset 取 customers/orders/contracts；可选按单个字段做 eq/contains/gte/lte 过滤。",
+            Description = "查询业务数据集（只读）。dataset 为服务端数据集名；可选按单个字段做 eq/contains/gte/lte 过滤。",
             RiskLevel = Risk.Low,
             Permissions = new[] { Permissions.DataRead },
             Params = new()
             {
-                ["dataset"] = "customers | orders | contracts（必填）",
+                ["dataset"] = "数据集名（必填）",
                 ["field"] = "过滤字段名（可选）",
                 ["op"] = "eq | contains | gte | lte（可选，默认 eq）",
                 ["value"] = "过滤值（可选）",
@@ -182,7 +187,7 @@ public static class ToolCatalog
             Permissions = new[] { Permissions.DataWrite },
             Params = new()
             {
-                ["dataset"] = "customers | orders | contracts（必填）",
+                ["dataset"] = "数据集名（必填）",
                 ["id"] = "记录主键（必填）",
                 ["field"] = "要修改的字段名（必填，必须在白名单内）",
                 ["value"] = "新的字段值（必填）",
@@ -202,7 +207,7 @@ public static class ToolCatalog
             Permissions = new[] { Permissions.DataDelete },
             Params = new()
             {
-                ["dataset"] = "customers | orders | contracts（必填）",
+                ["dataset"] = "数据集名（必填）",
                 ["id"] = "记录主键（必填）",
                 ["reason"] = "删除原因（必填，会展示给审批人）",
             },
@@ -248,166 +253,9 @@ public static class ToolCatalog
             AllowedParamNames = Array.Empty<string>(),
         },
 
-        // ---------------- 甲方 / 乙方 对接业务（业务对接台） ----------------
-        ["my_client"] = new ToolDefinition
-        {
-            Name = "my_client",
-            Title = "查看我司档案",
-            Description = "查看与自己账号绑定的甲方客户档案（只读）。未建档时会提示先提交建档申请。",
-            RiskLevel = Risk.Low,
-            Permissions = new[] { Permissions.ClientRead },
-            Params = new(),
-            AllowedParamNames = Array.Empty<string>(),
-        },
-        ["create_client_profile"] = new ToolDefinition
-        {
-            Name = "create_client_profile",
-            Title = "提交建档申请",
-            Description = "甲方提交本公司档案（公司名称/联系人/联系电话/所属行业/需求摘要）。"
-                          + "主键与账号绑定由服务端生成，客户端不能指定；必须经管理员审批通过后才会建档。",
-            RiskLevel = Risk.Medium,
-            RequiresApproval = true,
-            StateChanging = true,
-            Permissions = new[] { Permissions.ClientWrite },
-            Params = new()
-            {
-                ["name"] = "公司名称（必填，≤40 字符）",
-                ["contact"] = "联系人（必填，≤20 字符）",
-                ["phone"] = "联系电话（必填，11 位手机号）",
-                ["industry"] = "所属行业（可选：制造/科技/物流/教育/传媒/金融/其它）",
-                ["requirement"] = "需求摘要（可选，≤200 字符）",
-            },
-            RequiredParams = new[] { "name", "contact", "phone" },
-            AllowedParamNames = new[] { "name", "contact", "phone", "industry", "requirement" },
-        },
-        ["update_client_profile"] = new ToolDefinition
-        {
-            Name = "update_client_profile",
-            Title = "修改客户档案",
-            Description = "修改甲方客户档案的单个字段（高危：必须人工审批，执行前记录旧值以便回退）。"
-                          + "甲方只能改自己的档案，且只能改公司名称/联系人/电话/行业/需求摘要；员工可改全部可写字段。"
-                          + "**参数用名字即可**：传 client=公司名关键字（如“示例物流”），不必要求用户提供编号；"
-                          + "枚举字段可以直接说口语（如“重要”“跟进”），系统会映射到合法取值。",
-            RiskLevel = Risk.High,
-            RequiresApproval = true,
-            StateChanging = true,
-            Permissions = new[] { Permissions.ClientWrite },
-            Params = new()
-            {
-                ["client_id"] = "客户编号（可选；与 client 二选一）",
-                ["client"] = "公司名/联系人关键字（推荐，员工用；甲方留空表示改自己的档案）",
-                ["field"] = "字段名（甲方可用：name/contact/phone/industry/requirement；员工另可用：level/status/remark）",
-                ["value"] = "新值（必填，枚举字段可写口语）",
-                ["reason"] = "修改原因（建议填写，会展示给审批人）",
-            },
-            RequiredParams = new[] { "field", "value" },
-            AllowedParamNames = new[] { "client_id", "client", "field", "value", "reason" },
-        },
-        ["assign_client_owner"] = new ToolDefinition
-        {
-            Name = "assign_client_owner",
-            Title = "指派客户负责人",
-            Description = "把客户档案的负责员工指派/变更为指定人员（员工与管理员可用，必须人工审批）。"
-                          + "传 client=公司名关键字即可，不必提供编号。",
-            RiskLevel = Risk.Medium,
-            RequiresApproval = true,
-            StateChanging = true,
-            Permissions = new[] { Permissions.ClientAssign },
-            Params = new()
-            {
-                ["client_id"] = "客户编号（可选；与 client 二选一）",
-                ["client"] = "公司名/联系人关键字（推荐）",
-                ["owner"] = "负责员工用户名（必填）",
-                ["reason"] = "指派原因（建议填写）",
-            },
-            RequiredParams = new[] { "owner" },
-            AllowedParamNames = new[] { "client_id", "client", "owner", "reason" },
-        },
-        ["search_clients"] = new ToolDefinition
-        {
-            Name = "search_clients",
-            Title = "查询客户档案",
-            Description = "按单个字段过滤查询甲方客户档案（只读，最多 50 条）。字段可取 name/contact/phone/industry/level/status/owner。",
-            RiskLevel = Risk.Low,
-            Permissions = new[] { Permissions.ClientSearch },
-            Params = new()
-            {
-                ["field"] = "过滤字段名（可选）",
-                ["op"] = "eq | contains | gte | lte（可选，默认 eq）",
-                ["value"] = "过滤值（可选）",
-                ["limit"] = "返回条数（可选，1-50，默认 20）",
-            },
-            AllowedParamNames = new[] { "field", "op", "value", "limit" },
-        },
-        ["get_client_detail"] = new ToolDefinition
-        {
-            Name = "get_client_detail",
-            Title = "查看客户详情",
-            Description = "查看某个甲方客户的完整档案及其需求单（只读）。传 client=公司名关键字即可。",
-            RiskLevel = Risk.Low,
-            Permissions = new[] { Permissions.ClientSearch },
-            Params = new()
-            {
-                ["client_id"] = "客户编号（可选；与 client 二选一）",
-                ["client"] = "公司名/联系人关键字（推荐）",
-            },
-            AllowedParamNames = new[] { "client_id", "client" },
-        },
-        ["submit_requirement"] = new ToolDefinition
-        {
-            Name = "submit_requirement",
-            Title = "提交需求单",
-            Description = "提交一条甲方需求单（必须人工审批后才会正式立项）。甲方只能给自己的档案提交；"
-                          + "员工可以指定 customer=公司名关键字（或 customer_id）代客户提交。需求编号与提交人由服务端生成。",
-            RiskLevel = Risk.Medium,
-            RequiresApproval = true,
-            StateChanging = true,
-            Permissions = new[] { Permissions.ReqCreate },
-            Params = new()
-            {
-                ["customer_id"] = "甲方客户编号（可选；与 customer 二选一）",
-                ["customer"] = "公司名关键字（员工代客户提交时用）",
-                ["title"] = "需求标题（必填，≤60 字符）",
-                ["detail"] = "需求描述（必填，≤500 字符）",
-                ["budget"] = "预算(元)（可选，数字）",
-                ["expect_date"] = "期望交付日（可选，yyyy-MM-dd）",
-            },
-            RequiredParams = new[] { "title", "detail" },
-            AllowedParamNames = new[] { "customer_id", "customer", "title", "detail", "budget", "expect_date" },
-        },
-        ["my_requirements"] = new ToolDefinition
-        {
-            Name = "my_requirements",
-            Title = "查看我的需求单",
-            Description = "查看与自己档案关联的需求单（只读）。",
-            RiskLevel = Risk.Low,
-            Permissions = new[] { Permissions.ReqRead },
-            Params = new(),
-            AllowedParamNames = Array.Empty<string>(),
-        },
-        ["update_requirement"] = new ToolDefinition
-        {
-            Name = "update_requirement",
-            Title = "维护需求单",
-            Description = "修改需求单的单个字段（状态/预算/负责人/标题/描述/期望交付日；高危，必须人工审批）。"
-                          + "**用标题关键字定位即可**：传 requirement=标题关键字（如“设备数据看板”），不必让用户背 R4001。",
-            RiskLevel = Risk.High,
-            RequiresApproval = true,
-            StateChanging = true,
-            Permissions = new[] { Permissions.ReqWrite },
-            Params = new()
-            {
-                ["id"] = "需求编号（可选；与 requirement 二选一）",
-                ["requirement"] = "需求标题关键字（推荐）",
-                ["field"] = "字段名（title/detail/budget/expect_date/status/owner，必填）",
-                ["value"] = "新值（必填，状态可写口语如“报价中/已完成”）",
-                ["reason"] = "修改原因（建议填写）",
-            },
-            RequiredParams = new[] { "field", "value" },
-            AllowedParamNames = new[] { "id", "requirement", "field", "value", "reason" },
-        },
+        //对接业务工具
 
-        // ---------------- 检索与统计（AI 多步干活的"眼睛"） ----------------
+        //检索与统计工具
         ["search_files"] = new ToolDefinition
         {
             Name = "search_files",
@@ -450,7 +298,7 @@ public static class ToolCatalog
                           + "甲方只能统计到本公司的数据，员工/管理员可统计全量。",
             RiskLevel = Risk.Low,
             Permissions = new[] { Permissions.DataRead },
-            Params = new() { ["dataset"] = "customers | requirements | orders | contracts（可选，默认全部）" },
+            Params = new() { ["dataset"] = "数据集名（可选，默认全部）" },
             AllowedParamNames = new[] { "dataset" },
         },
         ["list_users"] = new ToolDefinition
@@ -469,20 +317,8 @@ public static class ToolCatalog
             },
             AllowedParamNames = new[] { "keyword", "role", "limit" },
         },
-        ["find_client"] = new ToolDefinition
-        {
-            Name = "find_client",
-            Title = "按名字找客户",
-            Description = "用公司名/联系人/负责人的关键字找客户档案，返回候选（含编号）。"
-                          + "**不需要用户提供 C1004 这种编号**：拿到候选后直接用公司名调用其它工具即可。",
-            RiskLevel = Risk.Low,
-            Permissions = new[] { Permissions.ClientSearch },
-            Params = new() { ["keyword"] = "公司名/联系人/负责人关键字（必填）", ["limit"] = "返回条数（可选，默认 10）" },
-            RequiredParams = new[] { "keyword" },
-            AllowedParamNames = new[] { "keyword", "limit" },
-        },
 
-        // ---------------- 文件管理（改名 / 建目录 / 文件信息） ----------------
+        //文件管理工具
         ["rename_file"] = new ToolDefinition
         {
             Name = "rename_file",
@@ -572,7 +408,7 @@ public static class ToolCatalog
             AllowedParamNames = new[] { "task_id", "reason" },
         },
 
-        // ---------------- 管理端 AI 专用（只读分析，绝不执行破坏性动作） ----------------
+        //管理端只读工具
         ["a_pending_tasks"] = new ToolDefinition
         {
             Name = "a_pending_tasks",
@@ -643,55 +479,61 @@ public static class ToolCatalog
         },
     };
 
-    /// <summary>角色 → 权限组（最小权限原则：用户拿不到 data.write / data.delete）。</summary>
+    //角色到权限的映射
     public static readonly Dictionary<string, string[]> RolePermissions = new(StringComparer.Ordinal)
     {
-        // 甲方（用户）：能维护**自己**的档案与需求单，看不到别的客户
-        [Roles.User] = new[]
+        //员工权限
+        [Roles.Employee] = new[]
         {
             Permissions.FileRead, Permissions.FileWrite, Permissions.FileDelete,
             Permissions.DataRead, Permissions.NoticeSend,
-            Permissions.ClientRead, Permissions.ClientWrite,
-            Permissions.ReqRead, Permissions.ReqCreate,
         },
-        // 乙方员工：能看/改全部客户档案、指派负责人、维护需求单，但不能删数据
-        [Roles.Staff] = new[]
+        //财务权限
+        [Roles.Finance] = new[]
         {
             Permissions.FileRead, Permissions.FileWrite, Permissions.FileDelete,
             Permissions.ShareRead, Permissions.ShareWrite,
             Permissions.DataRead, Permissions.DataWrite, Permissions.NoticeSend,
-            Permissions.ClientRead, Permissions.ClientSearch, Permissions.ClientWrite, Permissions.ClientAssign,
-            Permissions.ReqRead, Permissions.ReqWrite, Permissions.ReqCreate,
         },
+        //管理员权限
         [Roles.Admin] = new[]
         {
             Permissions.FileRead, Permissions.FileWrite, Permissions.FileDelete,
             Permissions.ShareRead, Permissions.ShareWrite,
             Permissions.DataRead, Permissions.DataWrite, Permissions.DataDelete,
             Permissions.NoticeSend, Permissions.AdminRead, Permissions.UserRead,
-            Permissions.ClientRead, Permissions.ClientSearch, Permissions.ClientWrite, Permissions.ClientAssign,
-            Permissions.ReqRead, Permissions.ReqWrite, Permissions.ReqCreate,
+        },
+        //超级管理员权限
+        [Roles.SuperAdmin] = new[]
+        {
+            Permissions.FileRead, Permissions.FileWrite, Permissions.FileDelete,
+            Permissions.ShareRead, Permissions.ShareWrite,
+            Permissions.DataRead, Permissions.DataWrite, Permissions.DataDelete,
+            Permissions.NoticeSend, Permissions.AdminRead, Permissions.UserRead,
         },
     };
 
+    //取角色权限
     public static string[] PermissionsOf(string role)
         => RolePermissions.TryGetValue(role, out var perms) ? perms : Array.Empty<string>();
 
+    //判权限
     public static bool HasPermission(string role, string permission)
         => PermissionsOf(role).Contains(permission, StringComparer.Ordinal);
 
+    //取工具定义
     public static ToolDefinition? Get(string name)
         => !string.IsNullOrWhiteSpace(name) && All.TryGetValue(name.Trim(), out var tool) ? tool : null;
 
-    /// <summary>某角色可用的工具集合（管理端只读工具只对 admin 可见）。</summary>
+    //某角色可用工具
     public static List<ToolDefinition> ForRole(string role)
         => All.Values
-            .Where(t => !t.AdminOnly || role == Roles.Admin)
+            .Where(t => !t.AdminOnly || Roles.IsAdminSide(role))
             .Where(t => t.Permissions.All(p => HasPermission(role, p)))
             .OrderBy(t => t.Name, StringComparer.Ordinal)
             .ToList();
 
-    /// <summary>生成给 AI 看的工具说明（同时也决定了 AI "能想到什么"）。</summary>
+    //生成给 AI 的工具说明
     public static string SchemaForPrompt(string role)
     {
         var sb = new StringBuilder();

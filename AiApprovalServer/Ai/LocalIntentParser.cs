@@ -3,13 +3,7 @@ using AiApproval.Core;
 
 namespace AiApproval.Ai;
 
-/// <summary>
-/// 本地意图解析（无 AI 密钥时的降级通道，也是"AI 不可用"时的可用性保障）。
-///
-/// 它只做**保守的关键词/正则**解析：不确定就返回 ask，绝不猜测参数。
-/// 注意：本地解析的结果同样要过规则引擎与 AI 审核，安全等级与 AI 解析完全一致——
-/// 降级只是"少了智能"，不是"少了防线"。
-/// </summary>
+//本地意图解析（降级通道）
 public static class LocalIntentParser
 {
     private static readonly Regex PathToken = new(
@@ -20,11 +14,13 @@ public static class LocalIntentParser
 
     private static readonly (string Dataset, string[] Keywords)[] DatasetMap =
     {
+        ("invoices", new[] { "报销单", "报销", "invoices", "单据" }),
         ("customers", new[] { "客户", "customers", "档案" }),
         ("orders", new[] { "订单", "orders", "order" }),
         ("contracts", new[] { "合同", "contracts", "contract" }),
     };
 
+    //解析本地意图
     public static IntentPlan Parse(string message, string role)
     {
         var text = (message ?? "").Trim();
@@ -33,18 +29,18 @@ public static class LocalIntentParser
         if (text.Length == 0)
             return Ask("请输入你的请求，例如：列出我的文件。");
 
-        // 管理端只读分析（管理员视角）
-        if (role == Roles.Admin)
+        //管理端只读分析
+        if (Roles.IsAdminSide(role))
         {
             var adminPlan = ParseAdmin(text);
             if (adminPlan is not null) return adminPlan;
         }
 
-        // 统计类问句（"有多少客户/需求单"）
+        //统计类问句
         var countPlan = ParseCount(text);
         if (countPlan is not null) return countPlan;
 
-        // 只有关键词没有扩展名 → 先检索（"读一下日报"）
+        //只有关键词没有扩展名则先检索
         var searchPlan = ParseFileSearch(text);
         if (searchPlan is not null) return searchPlan;
 
@@ -65,7 +61,7 @@ public static class LocalIntentParser
         if (Contains(text, "我的权限", "我是谁", "我的角色", "有什么权限"))
             return Call("查看本人角色与权限", "my_profile");
 
-        // 通知
+        //通知
         if (Contains(text, "通知", "提醒", "发消息", "发送消息"))
         {
             var to = Contains(text, "审批人", "管理员") ? "approver" : "self";
@@ -79,7 +75,7 @@ public static class LocalIntentParser
             });
         }
 
-        // 业务数据：修改 / 删除 / 查询
+        //业务数据增删查
         foreach (var (dataset, keywords) in DatasetMap)
         {
             if (!Contains(text, keywords)) continue;
@@ -135,9 +131,8 @@ public static class LocalIntentParser
             }
         }
 
-        // 文件：删除
-        // 注意：判断"意图动词"时必须限定在**路径之前**出现——否则文件名里带"删除"两个字
-        // （例如「写入 待删除.txt 内容：…」）会被误判成删除意图。这是实测踩到的坑。
+        //文件：删除
+        //意图动词必须在路径之前出现
         if (VerbBeforePath(text, "删除", "移除", "清理") && PathToken.IsMatch(text))
         {
             var path = PathToken.Match(text).Groups["p"].Value;
@@ -149,7 +144,7 @@ public static class LocalIntentParser
             });
         }
 
-        // 文件：写入
+        //文件：写入
         if (VerbBeforePath(text, "写入", "保存", "创建", "新建", "追加", "添加", "加上") && PathToken.IsMatch(text))
         {
             var path = PathToken.Match(text).Groups["p"].Value;
@@ -168,7 +163,7 @@ public static class LocalIntentParser
             });
         }
 
-        // 文件：读取
+        //文件：读取
         if (VerbBeforePath(text, "读取", "打开", "查看", "显示") && PathToken.IsMatch(text))
         {
             var path = PathToken.Match(text).Groups["p"].Value;
@@ -179,7 +174,7 @@ public static class LocalIntentParser
             });
         }
 
-        // 文件：列表
+        //文件：列表
         if (Contains(text, "列出", "文件列表", "有哪些文件", "目录", "看看文件"))
         {
             return Call("列出工作区文件", "list_files", new()
@@ -191,16 +186,21 @@ public static class LocalIntentParser
         return Ask("（本地指令模式）我没能确定你的意图。" + HelpText());
     }
 
+    //管理端意图
     private static IntentPlan? ParseAdmin(string text)
     {
         if (text.Contains("待审批", StringComparison.Ordinal) || text.Contains("待处理", StringComparison.Ordinal)
             || text.Contains("待确认", StringComparison.Ordinal) || text.Contains("待办", StringComparison.Ordinal))
             return Call("拉取待审批任务清单", "a_pending_tasks");
 
-        // 有多少用户 / 账号名册
+        //账号名册统计
         if (Contains(text, "多少用户", "多少账号", "用户数", "账号数", "用户列表", "账号列表", "名册", "有哪些人", "多少个人"))
         {
-            var role = Contains(text, "员工") ? "staff" : Contains(text, "管理员") ? "admin" : Contains(text, "甲方", "客户账号") ? "user" : "";
+            var role = Contains(text, "财务") ? Roles.Finance
+                : Contains(text, "员工") ? Roles.Employee
+                : Contains(text, "超级管理员") ? Roles.SuperAdmin
+                : Contains(text, "管理员") ? Roles.Admin
+                : "";
             var args = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["limit"] = "100" };
             if (role.Length > 0) args["role"] = role;
             return Call("统计系统账号数量与名册", "list_users", args);
@@ -220,14 +220,14 @@ public static class LocalIntentParser
         return null;
     }
 
-    /// <summary>统计类问句（"有多少客户/需求单/订单"，本地模式也能答）。</summary>
+    //统计类问句
     private static IntentPlan? ParseCount(string text)
     {
         if (!Contains(text, "多少", "几条", "几笔", "几个", "数量", "统计")) return null;
 
         string dataset = "";
-        if (Contains(text, "客户", "甲方公司")) dataset = "customers";
-        else if (Contains(text, "需求")) dataset = "requirements";
+        if (Contains(text, "报销", "单据")) dataset = "invoices";
+        else if (Contains(text, "客户", "甲方公司")) dataset = "customers";
         else if (Contains(text, "订单")) dataset = "orders";
         else if (Contains(text, "合同")) dataset = "contracts";
 
@@ -236,12 +236,12 @@ public static class LocalIntentParser
         return Call(dataset.Length > 0 ? $"统计{dataset}条数" : "统计业务数据条数", "count_records", args);
     }
 
-    /// <summary>只有关键词、没有扩展名的文件读取请求 → 先检索（"读一下日报"）。</summary>
+    //只有关键词时的文件检索
     private static IntentPlan? ParseFileSearch(string text)
     {
         if (!Contains(text, "读取", "打开", "查看", "找", "搜", "看看")) return null;
 
-        // 已经能识别成"带扩展名的具体文件"时，交给读取分支处理
+        //已经能识别成带扩展名的具体文件时交给读取分支
         if (PathToken.IsMatch(text)) return null;
 
         var match = Regex.Match(text, @"(?:读取|打开|查看|找一下|查找|搜索|找|搜|看看)\s*[「『""']?(?<k>[\u4e00-\u9fa5A-Za-z0-9_\-]{2,20})",
@@ -258,6 +258,7 @@ public static class LocalIntentParser
             new() { ["keyword"] = keyword, ["content"] = keyword, ["limit"] = "30" });
     }
 
+    //构造工具调用
     private static IntentPlan Call(string intent, string tool, Dictionary<string, string>? args = null)
         => new()
         {
@@ -268,30 +269,29 @@ public static class LocalIntentParser
             Source = "local-fallback",
         };
 
+    //构造追问
     private static IntentPlan Ask(string reply)
         => new() { Intent = "未识别到可执行意图", Tool = "ask", Reply = reply, Source = "local-fallback" };
 
+    //本地指令帮助
     public static string HelpText() =>
         "可用本地指令（未配置 AI 密钥时的降级模式）："
-        + "① 列出文件 / 列出共享区文件；"
-        + "② 读取 note.txt；"
-        + "③ 写入 note.txt 内容：xxx（覆盖用“覆盖”，追加用“追加”）；"
-        + "④ 删除 note.txt 原因：xxx；"
-        + "⑤ 查询客户 / 查询订单 / 查询合同（可加“等级=黄金”）；"
-        + "⑥ 修改客户 C1003 等级 改为 铂金；"
-        + "⑦ 删除客户 C1003 原因：重复录入；"
-        + "⑧ 通知我 标题：xxx 内容：xxx / 通知审批人 …；"
-        + "⑨ 我的任务 / 我的权限。";
+        + "列出文件 / 列出共享区文件；"
+        + "读取 note.txt；"
+        + "写入 note.txt 内容：xxx（覆盖用“覆盖”，追加用“追加”）；"
+        + "删除 note.txt 原因：xxx；"
+        + "检索文件 关键字：xxx；"
+        + "统计报销单条数（也可统计订单或合同）；"
+        + "通知我 标题：xxx 内容：xxx / 通知审批人 …；"
+        + "我的任务 / 我的权限；"
+        + "管理端：待审批清单 / 有多少用户 / 审计检索。"
+        + "报销单的提交、审核、删除与回退请走财务工作台或报销接口。";
 
+    //含任一关键词
     private static bool Contains(string text, params string[] keywords)
         => keywords.Any(k => text.Contains(k, StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>
-    /// 意图动词必须出现在**路径之前**（或句子里根本没有路径）才算命中。
-    /// 例：「写入 待删除.txt 内容：马上删掉」→ 动词"写入"在路径前 → 写入；
-    ///     而「删除 待删除.txt」→ "删除"在索引 0 → 删除。
-    /// 这样文件名/内容里出现的"删除""写入"字样就不会劫持意图。
-    /// </summary>
+    //动词必须在路径之前才算命中
     private static bool VerbBeforePath(string text, params string[] verbs)
     {
         var pathMatch = PathToken.Match(text);
@@ -307,6 +307,7 @@ public static class LocalIntentParser
         return false;
     }
 
+    //抽取字段值
     private static string? ExtractField(string text, string fieldName)
     {
         var rx = new Regex($"{fieldName}\\s*[:：]\\s*(?<v>[^\\n]+?)(?=(\\s*(标题|内容|原因|字段|改为|改成)\\s*[:：])|$)",
@@ -318,6 +319,7 @@ public static class LocalIntentParser
         return value.Length == 0 ? null : value;
     }
 
+    //抽取字段与值
     private static (string Field, string Value) ExtractAssignment(string text)
     {
         var rx = new Regex(@"(?<f>[A-Za-z_\u4e00-\u9fa5]{1,20})[^\S\n]*(?:改为|改成|=|:|：)[^\S\n]*(?<v>[^\n，。;；]{1,60})",
@@ -328,7 +330,7 @@ public static class LocalIntentParser
         var field = m.Groups["f"].Value.Trim();
         var value = m.Groups["v"].Value.Trim();
 
-        // "把…的等级改为" 之类的口语，取最后一个字段名更稳
+        //口语说法取最后一个字段名更稳
         if (field is "把" or "将" or "修改" or "更新") 
         {
             var tail = text[..m.Index];
@@ -339,6 +341,7 @@ public static class LocalIntentParser
         return (field, value);
     }
 
+    //抽取枚举值
     private static string? ExtractEnum(string text)
     {
         foreach (var candidate in new[] { "普通", "白银", "黄金", "铂金", "待付款", "已付款", "已发货", "已完成", "已取消", "草拟", "待签", "生效中", "已归档" })
@@ -348,6 +351,7 @@ public static class LocalIntentParser
         return null;
     }
 
+    //截断超长文本
     private static string Clamp(string value, int max)
         => value.Length <= max ? value : value[..max];
 }

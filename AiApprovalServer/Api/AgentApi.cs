@@ -6,13 +6,7 @@ using AiApproval.Tools;
 
 namespace AiApproval.Api;
 
-/// <summary>
-/// 业务侧接口（用户 / 员工）。
-///
-/// 注意：连"浏览自己的文件列表"这种只读 UI 操作，也走同一条
-/// 规则引擎 + Harness 通道（只是不落任务、不需要审批），
-/// 避免出现"界面用的旁路接口"绕过权限校验这种典型漏洞。
-/// </summary>
+//业务侧接口（用户/员工）
 public static class AgentApi
 {
     public static void Map(WebApplication app)
@@ -87,7 +81,7 @@ public static class AgentApi
             var task = await tasks.GetAsync(Api.Clean(id, 64));
             if (task is null) return Api.Error(404, "NOT_FOUND", "任务不存在");
 
-            // 水平越权防护：只能看自己的任务（管理员走管理端接口）
+            //只能看自己的任务
             if (task.UserId != identity.User.Id && !identity.IsAdmin)
                 return Api.Error(403, "FORBIDDEN", "无权查看该任务");
 
@@ -175,6 +169,7 @@ public static class AgentApi
         });
     }
 
+    //对话入口，限流后交给编排器
     private static async Task<IResult> ChatAsync(HttpContext context, AgentOrchestrator agent, SecurityGuard guard,
         AppConfig cfg, AuditLog audit)
     {
@@ -223,7 +218,7 @@ public static class AgentApi
             injectionFlags = outcome.InjectionFlags,
             notes = outcome.Notes,
             result = outcome.Result,
-            // 多步执行轨迹：前端据此展示"先搜 → 再读 → 再写"的过程
+            //多步执行轨迹
             steps = outcome.Steps.Select(s => new
             {
                 index = s.Index,
@@ -240,7 +235,7 @@ public static class AgentApi
         });
     }
 
-    /// <summary>只读工具直通（界面用）：规则引擎照常校验，但不产生任务/审批。</summary>
+    //只读工具直通，不产生任务
     private static async Task<IResult> RunReadOnlyAsync(RequestIdentity identity, string toolName,
         Dictionary<string, string> args, RuleEngine rules, Harness harness, HttpContext context)
     {

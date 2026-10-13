@@ -4,6 +4,74 @@
 
 ---
 
+## [未发布]
+
+### 账号权威收敛与工程化整理（进行中）
+
+- **协作方登录改为"先问本仓库"**：账号权威真正收敛到本仓库。协作方网关的登录流程改为先调本仓库 `POST /api/auth/login`，
+  本仓库返回 4xx（口令错误、账号禁用、账号锁定、限流）时**直接失败、不再回落到协作方自己的飞书用户表**；
+  只有本仓库 5xx 或连不上时才按 `BACKEND_MODE` 决定是否用本地表兜底（`required` 直接 503，`preferred` 兜底）。
+  `BACKEND_BASE_URL` 留空时保持原离线行为。本仓库四角色映射到网关三标签（`admin` 与 `superadmin` → 管理员）。
+  新增离线单测 `xiaocainu/tests/test_backend_authority.py`（7 项，覆盖接受/拒绝/不可达/未启用四种情形与角色映射）。
+- **协作方适配器区分业务拒绝与基础设施故障**：`backend_client.login` 按 HTTP 状态码归类，4xx 抛 `BackendRejected`、5xx 抛 `BackendError`，
+  让"主服务器明确拒绝口令"不再被当成"连不上"而回落到本地表。
+- **修复协作方用户表缓存失效判定**：`UserStore._load` 的过期比较由 `>` 改为 `>=`，使 `cache_ttl=0` 真的等于"不缓存"
+  （Windows 时钟粒度下两次调用可能取到同一个 `now`，导致刚写入的字段读不到）。协作方测试套件因此从 170 通过/1 失败变为 **171 全通过**。
+- **注释全面清理**：C#（约 1600 行注释压到约 800 行）、前端 JS/HTML、Node 测试脚本、PowerShell 运行器与协作方 Python（约 870 行文档字符串压到 5 行）
+  统一改为"一行短注释说明这段代码做什么"的风格，删掉解释"为什么/何后果"的长段与装饰性分隔线；`tests/run-all.ps1` 保持纯 ASCII；
+  协作方代码的注释里不再出现内部代号。所有改动都经过"剥掉注释后逐行比对代码"的等价性校验，代码零改动。
+- **敏感文件外置与清空**：本机私密配置（`AiApprovalServer/config/secrets.local.json`）与协作方 `.env` 已导出到桌面备份文件夹后在仓库内清空；
+  含真实密钥的两份本地笔记与协作方 `.git` 历史一并导出并加入 `.gitignore`；模板与文档里的真实表标识替换为占位符。
+- **文档重构**：新增 [docs/前后端分离与接入指南.md](docs/前后端分离与接入指南.md)（分工边界、三个入口、部署形态、接口清单、接入最短路径、排障）；
+  README 补"前后端怎么分工、怎么部署、怎么接入"；业务场景、部署与配置、架构与数据模型三份文档按"员工走协作方对话式前端 / 财务走 `/finance` / 管理员走 `/admin`"重写入口与登录链路说明。
+
+### 报销系统主服务器改造（进行中）
+
+- **账号权威 + 飞书镜像**：账号以本机 `App_Data/users.json` 为唯一权威（PBKDF2-SHA256 21 万次 + 16 字节随机盐、令牌世代、工号 `E+4`），
+  同时 best-effort 镜像到飞书用户表；**镜像失败静默处理**（只写 `feishu.mirror.failed` 审计并更新 `mirrorState`），注册、登录、改角色不受影响。
+  默认 `demo` 口令模式：镜像只写随机演示口令的哈希，真实口令永不出本机；管理端可重试镜像与取回演示口令。
+  启动时会比对飞书用户表，发现"飞书有、本机无"的外部账号记 `feishu.mirror.foreign-account` 审计，它们永远无法登录本系统。
+- **四角色权限矩阵**：超级管理员 / 管理员 / 财务部 / 员工；注册改为管理员行为（未登录 401），
+  "授予或撤销管理员"仅超管可做，任何人不能改自己的角色，系统必须保留至少一个超管；旧角色自动迁移（user→员工、staff→财务部）。
+- **报销单写入口唯一**：新增 `/api/invoice/*`（提交 / 列表 / 详情 / 审核 / 修改 / 删除 / 回退 / 契约元数据），
+  服务端强制枚举白名单、金额区间、状态流转与数据边界，并盖章申请人、工号、提交时间、合规结果与状态；
+  每次写飞书前存整行快照与撤销日志，管理员可按日志回退（新建→删除、删除→快照重建、修改→写回旧值，回退幂等）。
+- **合规预审**：无票硬性阻断；票据未提、招待费超 2000、办公用品超 5000、差旅按城市分级（一线 500 / 新一线 350 / 二线 250）、
+  开票超 30 天记为风险并写入风险摘要。
+- **凭证外置**：飞书凭证从 `config/secrets.local.json`（已 gitignore）或 `AISERVER_FEISHU_*` 环境变量读取；
+  交付前清空该文件即可，缺文件不影响启动（只跳过镜像与报销单接口）。
+- **新增财务工作台 `/finance`**：单据列表与筛选、审核、按权限修改与删除、契约规则展示。
+- **管理后台扩展**：账号管理（创建 / 改角色 / 停用 / 重置口令 / 删除 / 镜像重试 / 演示口令面板）与报销单版本回退。
+- **删除旧业务对接台**：移除 `/biz` 页面、`Api/BizApi.cs`、业务数据播种，以及客户与需求单相关工具和权限键。
+- **飞书表格配置容错（V2）**：`Feishu:AppToken` / `TableId` / `UserTableId` 允许直接粘贴飞书网页地址，启动时自动取出 base 与 table 标识
+  （截断 `&view=…` 之类的参数）并在启动日志里给出 ` [提示] ` 说明；新增 `Feishu:TableUrl` / `Feishu:UserTableUrl`（未显式配置时按
+  `https://my.feishu.cn/base/{appToken}?table={tableId}` 自动拼接）；`GET /api/invoice/meta` 新增 `tableUrl` / `userTableUrl` / `feishuConfigured` 三个字段，
+  启动横幅也会打印原表与用户表的地址。
+- **初始超级管理员引导**：新增 `Bootstrap:Admin` 配置（环境变量 `AISERVER_BOOTSTRAP_*` → `config/secrets.local.json` 的 `BootstrapAdmin` 段 → `appsettings.json`），
+  用于在全新部署里播种一个可登录的超管——超管不能通过界面创建，否则没人能授予第一个管理员。推荐只填 `PasswordHash` + `PasswordSalt`（base64），
+  配置文件里不出现明文；只在账号库里不存在该用户名时创建一次，播种顺序在四个演示账号之后，已建出的账号改口令/停用/删除都不会被重启还原；
+  不写飞书用户表（`mirrorState = skipped`）；口令强度不套用注册策略，因此首次登录后必须立刻改密，交付前清空该配置段。审计 `system.bootstrap-admin`。
+- **飞书账号同步（管理端手工触发）**：新增 `GET /api/admin/users/feishu-rows`（只读预览对面用户表，需 `account.list`，响应不含口令哈希）与
+  `POST /api/admin/users/sync-from-feishu`（需 `account.create`，受后台写限流，支持 `dryRun` 预览；未配置飞书或读到 0 行返回 409 `SYNC_UNAVAILABLE`）。
+  **只补本机没有的账号**：本机已有账号的口令、角色、启停一律不动，缺 `record_id` 时认领对面的行；对面 hex 编码的 PBKDF2（10 万次）转 base64 导入并按
+  `Feishu:MirrorPbkdf2Iterations` 记录迭代次数（对方可用原口令登录本系统），没有可用哈希的账号标记 `needsPasswordReset`；
+  对面的「管理员」只映射为 `admin`，永不导入超管，调用者无权创建的角色逐行跳过。审计 `user.sync-feishu`（`PREVIEW` / `SUCCESS` / `FAIL` / `DENIED`）。
+- **账号来源标记**：`users.json` 新增 `origin` 字段（`local` / `feishu-sync` / `bootstrap`），`GET /api/admin/users` 一并返回，便于区分本机自建与对面导入。
+- **口令存储升级（慢哈希 + 服务端密钥）**：口令改为 `PBKDF2-HMAC-SHA256( HMAC-SHA256(服务端密钥, 口令), 每账号随机盐, 迭代次数 )`，
+  迭代次数默认 120 万（`Security:PasswordIterations` / `AISERVER_PASSWORD_ITERATIONS`，本机约 140 毫秒一次）；
+  新增方案标识 `passwordScheme`：早期数据（`pbkdf2-sha256`）与从协作方导入的账号（`partner-pbkdf2-sha256`）在**登录成功后自动升级**为当前方案，
+  口令不变、用户无感知，审计 `auth.password-upgraded`；`GET /api/admin/users` 返回 `passwordScheme`（`none` 表示尚未设置口令）与 `passwordIterations`。
+  服务端密钥由本机密钥材料派生，只拿到 `users.json` 无法离线爆破口令。
+- **修复**：超级管理员被 `role == Roles.Admin` 的裸比较挡在自己的管理端功能之外（规则引擎判"仅管理员可用"、
+  代理编排器不给管理端工具清单与只读降级），统一改为角色组判断 `Roles.IsAdminSide`；飞书用户表读取改为按 `page_token` 翻页（最多 20 页），
+  避免对面表超过单页时账号同步静默漏账号。
+- **修复（测试）**：账号套件对同一账号的高频读请求会撞上 `Limits:ReadPerMinutePerUser` 而偶发失败（429 被脚本当成"查不到记录"），
+  运行器为该档限流放宽并在脚本里显式提示非 200 响应；`e2e-biz.mjs` 移除后文档中的对应说明一并更新。
+- **修复**：超管被 `IsAdmin` 判断挡在管理端门外并累计攻击分；飞书凭证为空时启动崩溃（`FirstNonEmpty`）；
+  播种口令含用户名导致财务与超管账号播种失败；镜像重试复用请求对象导致重试必然抛错。
+
+---
+
 ## [1.0.0] - 2026-10-01
 
 首个对外开源版本：完整实现"规则引擎硬拦截 + AI 安全审核物理隔离 + 人工审批 + 快照回退 + 审计哈希链"的闭环。

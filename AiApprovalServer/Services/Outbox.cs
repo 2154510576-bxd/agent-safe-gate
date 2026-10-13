@@ -5,15 +5,7 @@ using AiApproval.Security;
 
 namespace AiApproval.Services;
 
-/// <summary>
-/// 出站通知箱。
-///
-/// 本环境无法依赖真实邮件服务，所以采取"双通道"设计：
-///   * 永远先落库（outbox.json）→ 后台可查看、可补发、可撤回；
-///   * 若配置了 SMTP（Mail.Enabled=true）才真正发信，失败也不影响主流程（只标记 FAILED）。
-///
-/// 这也让"补偿事务"有落点：通知发出去之后可以撤回（RECALLED），而不是只写一句"已发送"。
-/// </summary>
+//出站通知箱
 public sealed class Outbox
 {
     private readonly JsonStore _store;
@@ -29,6 +21,7 @@ public sealed class Outbox
         _logger = logger;
     }
 
+    //入队并尝试发信
     public async Task<OutboxMessage> EnqueueAsync(string to, string subject, string body, string taskId,
         string ownerUserId, string ownerUserName, string approvalLink)
     {
@@ -87,6 +80,7 @@ public sealed class Outbox
         return message;
     }
 
+    //列出通知
     public async Task<List<OutboxMessage>> ListAsync(string? ownerUserId = null, int limit = 100)
     {
         var all = await _store.ReadListAsync<OutboxMessage>(StoreNames.Outbox).ConfigureAwait(false);
@@ -96,12 +90,14 @@ public sealed class Outbox
         return query.Take(Math.Clamp(limit, 1, 300)).ToList();
     }
 
+    //按 id 取通知
     public async Task<OutboxMessage?> GetAsync(string id)
     {
         var all = await _store.ReadListAsync<OutboxMessage>(StoreNames.Outbox).ConfigureAwait(false);
         return all.FirstOrDefault(m => m.Id == id);
     }
 
+    //更新通知状态
     public async Task<bool> MarkAsync(string id, string status, string error)
         => await _store.MutateAsync<OutboxMessage, bool>(StoreNames.Outbox, list =>
         {
@@ -113,7 +109,7 @@ public sealed class Outbox
             return true;
         }).ConfigureAwait(false);
 
-    /// <summary>补偿事务：撤回已发出的通知（反操作）。</summary>
+    //撤回已发出的通知
     public async Task<bool> RecallAsync(string id, string actor)
     {
         var ok = await _store.MutateAsync<OutboxMessage, bool>(StoreNames.Outbox, list =>

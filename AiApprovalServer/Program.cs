@@ -5,8 +5,7 @@ using AiApproval.Security;
 using AiApproval.Services;
 using AiApproval.Tools;
 
-// 内容根目录解析：优先"自带 wwwroot 的目录"（发布目录 / 构建输出目录），
-// 其次当前工作目录（dotnet run 场景）。这样无论怎么启动，静态页面都能被找到。
+//找静态页面根目录
 static string ResolveAppRoot()
 {
     var candidates = new[]
@@ -32,26 +31,29 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
     WebRootPath = Path.Combine(appRoot, "wwwroot"),
 });
 
-// ---------------------------------------------------------------- 配置与密钥
+//配置与密钥
 var cfg = AppConfig.Load(builder.Configuration, builder.Environment.ContentRootPath);
 builder.WebHost.UseUrls(cfg.ListenUrl);
 
-// 请求体上限再收一层（Kestrel 层直接拒绝超大请求，减少中间件消耗）
+//限制请求体大小
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.Limits.MaxRequestBodySize = cfg.MaxRequestBodyBytes;
     options.Limits.RequestHeadersTimeout = TimeSpan.FromSeconds(15);
     options.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(60);
-    options.AddServerHeader = false;   // 不泄露服务器软件与版本
+    options.AddServerHeader = false;   //不泄露服务器版本
 });
 
-// ---------------------------------------------------------------- 依赖注入
+//注册服务
 builder.Services.AddSingleton(cfg);
 builder.Services.AddSingleton(new JsonStore(cfg.DataRoot));
 builder.Services.AddSingleton<AuditLog>();
 builder.Services.AddSingleton<JwtService>();
 builder.Services.AddSingleton<ApprovalSigner>();
 builder.Services.AddSingleton(new SecurityGuard(cfg.Limits, cfg.NonceWindowSeconds));
+builder.Services.AddSingleton<FeishuApi>();
+builder.Services.AddSingleton<FeishuMirror>();
+builder.Services.AddSingleton<InvoiceService>();
 builder.Services.AddSingleton<UserService>();
 builder.Services.AddSingleton<PathGuard>();
 builder.Services.AddSingleton<DatasetStore>();
@@ -63,15 +65,11 @@ builder.Services.AddSingleton<TaskService>();
 builder.Services.AddSingleton<ChatSessionStore>();
 builder.Services.AddSingleton<AiClient>();
 builder.Services.AddSingleton<AgentOrchestrator>();
-builder.Services.AddSingleton<BusinessSeed>();
 builder.Services.AddHostedService<MaintenanceService>();
 
 builder.Services.AddResponseCompression();
 
-// 只用控制台日志：
-//   1) Windows 上默认还会挂一个 EventLog provider，普通账号写系统事件日志会被拒绝（Win32 5），
-//      而"写日志失败"会变成 AggregateException 冒泡到 Kestrel —— 直接导致连接被重置；
-//   2) 服务日志里不应出现系统事件日志这种跨进程副作用，运维用控制台/重定向文件收集即可。
+//只用控制台日志
 builder.Logging.ClearProviders();
 builder.Logging.AddSimpleConsole(options =>
 {
@@ -82,18 +80,39 @@ builder.Logging.SetMinimumLevel(LogLevel.Information);
 
 var app = builder.Build();
 
-// ---------------------------------------------------------------- 启动期初始化
+//启动期初始化
 var users = app.Services.GetRequiredService<UserService>();
 var datasets = app.Services.GetRequiredService<DatasetStore>();
 var audit = app.Services.GetRequiredService<AuditLog>();
 
 var seedNotes = await users.EnsureSeedAsync();
-await datasets.EnsureSeedAsync();
-var businessSeed = app.Services.GetRequiredService<BusinessSeed>();
-var businessNotes = await businessSeed.EnsureAsync();
+//先播种演示账号再播种超管
+var bootstrapNote = await users.SeedBootstrapSuperAdminAsync();
 EnsureSharedWorkspace(cfg);
 
-// 共享文件区：员工可读写、普通用户不可见（用于演示"角色权限差异"）
+//飞书有本机无的账号只记审计
+if (cfg.FeishuConfigured && cfg.Feishu.DetectForeignAccounts)
+{
+    var mirror = app.Services.GetRequiredService<FeishuMirror>();
+    var rows = await mirror.ListUsersAsync();
+    if (rows.Count > 0)
+    {
+        var local = (await users.AllAsync())
+            .Select(u => u.UserName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var foreign = rows.Where(r => !string.IsNullOrWhiteSpace(r.UserName) && !local.Contains(r.UserName)).ToList();
+        foreach (var row in foreign)
+        {
+            await audit.WriteAsync("system", "system", "system", "", "feishu.mirror.foreign-account",
+                row.UserName, "IGNORED",
+                $"飞书用户表存在但本机账号库没有：{row.UserName}（{row.RealName}，工号 {row.EmployeeId}，对面角色 {row.RoleLabel}）；本系统登录只读本机 JSON，该账号无法登录");
+        }
+        if (foreign.Count > 0)
+            Console.WriteLine($" [镜像] 发现 {foreign.Count} 个仅存在于飞书用户表的账号，已记审计并忽略（它们无法登录本系统）");
+    }
+}
+
+//建共享工作区
 static void EnsureSharedWorkspace(AppConfig cfg)
 {
     var shareRoot = Path.Combine(cfg.WorkspacesDir, "share");
@@ -110,10 +129,10 @@ static void EnsureSharedWorkspace(AppConfig cfg)
     }
 }
 
-// ---------------------------------------------------------------- 管道
-// 顺序：安全中间件（含 WAF/蜜罐/签名/身份）→ 读接口限流 → 静态文件 → 业务端点
+//中间件管道（安全最先）
 app.UseMiddleware<SecurityMiddleware>();
 
+//读接口限流
 app.Use(async (context, next) =>
 {
     if (context.Request.Path.StartsWithSegments("/api") && HttpMethods.IsGet(context.Request.Method))
@@ -126,6 +145,7 @@ app.Use(async (context, next) =>
 
         if (!guard.TryConsume(key, cfg.Limits.ReadPerMinutePerUser, TimeSpan.FromMinutes(1)))
         {
+            //超限直接拒绝
             context.Response.StatusCode = 429;
             context.Response.ContentType = "application/json; charset=utf-8";
             await context.Response.WriteAsync("{\"ok\":false,\"code\":\"RATE_LIMITED\",\"message\":\"读取过于频繁，请稍后再试\"}");
@@ -138,11 +158,12 @@ app.Use(async (context, next) =>
 
 app.UseResponseCompression();
 app.UseDefaultFiles();
+//静态文件
 app.UseStaticFiles(new StaticFileOptions
 {
     OnPrepareResponse = ctx =>
     {
-        // 前端页面不做缓存：改版后用户刷新即可拿到新版本，避免"旧 JS 打新接口"
+        //前端页面不缓存
         if (ctx.File.Name.EndsWith(".html", StringComparison.OrdinalIgnoreCase)
             || ctx.File.Name.EndsWith(".js", StringComparison.OrdinalIgnoreCase)
             || ctx.File.Name.EndsWith(".css", StringComparison.OrdinalIgnoreCase))
@@ -150,28 +171,26 @@ app.UseStaticFiles(new StaticFileOptions
     },
 });
 
-// ---------------------------------------------------------------- 接口
+//注册接口
 AuthApi.Map(app);
 AgentApi.Map(app);
-BizApi.Map(app);
+InvoiceApi.Map(app);
 AdminApi.Map(app);
 
-// 页面入口显式映射（固定文件，不接受任何路径参数，杜绝路径穿越）。
-// 不依赖 DefaultFiles 的隐式重写行为：显式映射的响应行为可预测，也便于叠加安全响应头。
+//页面入口固定映射
 var indexFile = Path.Combine(app.Environment.WebRootPath, "index.html");
 var adminFile = Path.Combine(app.Environment.WebRootPath, "admin.html");
-var bizFile = Path.Combine(app.Environment.WebRootPath, "biz.html");
+var financeFile = Path.Combine(app.Environment.WebRootPath, "finance.html");
 
 app.MapGet("/", () => Results.File(indexFile, "text/html; charset=utf-8"));
 app.MapGet("/index.html", () => Results.File(indexFile, "text/html; charset=utf-8"));
 app.MapGet("/admin", () => Results.File(adminFile, "text/html; charset=utf-8"));
-app.MapGet("/biz", () => Results.File(bizFile, "text/html; charset=utf-8"));
-// 注意：路由模板 "/admin/" 与 "/admin" 等价，重复注册会触发 AmbiguousMatchException，
-// 因此带斜杠/子路径的请求统一 302 到固定地址（目标是硬编码常量，不存在开放重定向）。
+app.MapGet("/finance", () => Results.File(financeFile, "text/html; charset=utf-8"));
+//带斜杠的路径重定向
 app.MapGet("/admin/{*rest}", () => Results.Redirect("/admin"));
-app.MapGet("/biz/{*rest}", () => Results.Redirect("/biz"));
+app.MapGet("/finance/{*rest}", () => Results.Redirect("/finance"));
 
-// 统一 404：不区分"路径不存在"与"路径被安全策略忽略"，不给攻击者反馈
+//统一 404
 app.MapFallback(async context =>
 {
     context.Response.StatusCode = 404;
@@ -179,19 +198,23 @@ app.MapFallback(async context =>
     await context.Response.WriteAsync("{\"ok\":false,\"code\":\"NOT_FOUND\",\"message\":\"未找到资源\"}");
 });
 
-// ---------------------------------------------------------------- 启动横幅
+//启动横幅
 var baseUrl = cfg.ListenUrl.Replace("0.0.0.0", "127.0.0.1").Replace("+", "127.0.0.1");
 Console.WriteLine("==============================================================");
-Console.WriteLine(" AI Agent 安全执行与审批系统（星云游安全执行平台）");
+Console.WriteLine(" 报销系统主服务器（AI Agent 安全执行与审批平台）");
 Console.WriteLine("==============================================================");
 Console.WriteLine($" 用户前端   : {baseUrl}/");
-Console.WriteLine($" 业务对接台 : {baseUrl}/biz");
+Console.WriteLine($" 财务工作台 : {baseUrl}/finance");
 Console.WriteLine($" 管理后台   : {baseUrl}/admin");
 Console.WriteLine($" 数据目录   : {cfg.DataRoot}");
 Console.WriteLine($" AI 状态    : {(cfg.AiConfigured ? "已配置（" + cfg.Ai.Model + "），异步调用 + 物理隔离审核" : "未配置 → 本地意图解析 + 变更类操作全部转人工审批")}");
+Console.WriteLine($" 账号权威   : users.json（本机 JSON）；飞书镜像 {(cfg.FeishuConfigured ? $"已启用（{cfg.Feishu.MirrorPasswordMode} 口令模式，失败静默）" : "未配置（跳过镜像，不影响账号功能）")}");
+if (cfg.Feishu.TableUrl.Length > 0) Console.WriteLine($" 报销单原表 : {cfg.Feishu.TableUrl}");
+if (cfg.Feishu.UserTableUrl.Length > 0) Console.WriteLine($" 用户表原表 : {cfg.Feishu.UserTableUrl}");
 Console.WriteLine($" 审批通知   : {(cfg.Mail.Enabled ? "SMTP 已启用" : "SMTP 未启用 → 通知写入出站箱（后台可查看/撤回）")}");
 Console.WriteLine("--------------------------------------------------------------");
 
+//打印启动提示
 foreach (var warning in cfg.StartupWarnings) Console.WriteLine($" [提示] {warning}");
 
 if (seedNotes.Count > 0)
@@ -200,14 +223,17 @@ if (seedNotes.Count > 0)
     foreach (var note in seedNotes) Console.WriteLine($"   - {note}");
 }
 
-foreach (var note in businessNotes) Console.WriteLine($" [业务数据] {note}");
+if (bootstrapNote is not null)
+{
+    Console.WriteLine(" [初始超管] " + bootstrapNote);
+}
 
 Console.WriteLine("--------------------------------------------------------------");
 Console.WriteLine(" 安全基线：JWT+请求签名(防重放) | WAF+蜜罐+自动封禁 | 规则引擎硬拦截");
-Console.WriteLine("           AI 审核物理隔离 | 人工审批签名链接 | 快照+Diff 一键回退 | 审计哈希链");
+Console.WriteLine("           四角色权限矩阵 | 账号权威在本机 JSON | 审计哈希链 | 审批与快照回退");
 Console.WriteLine("==============================================================");
 
 await audit.WriteAsync("system", "system", "system", "", "system.startup", "server", "SUCCESS",
-    $"服务启动于 {cfg.ListenUrl}；AI={(cfg.AiConfigured ? "on" : "off")}；数据目录={cfg.DataRoot}");
+    $"服务启动于 {cfg.ListenUrl}；AI={(cfg.AiConfigured ? "on" : "off")}；飞书镜像={(cfg.FeishuConfigured ? cfg.Feishu.MirrorPasswordMode : "off")}；数据目录={cfg.DataRoot}");
 
 app.Run();

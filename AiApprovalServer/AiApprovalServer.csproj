@@ -33,4 +33,16 @@
     <Content Update="wwwroot/**/*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!--
+    真实密钥文件绝不进构建与发布产物：
+      config/ 下的 json 会被 Web SDK 默认当作 Content 复制到 bin/ 与 publish/，
+      于是"把一个发布包交给别人"就等于把飞书凭证和初始超管口令哈希一起交出去。
+      这里显式禁止复制真实文件、只放行模板；运行时由 AppConfig 自己定位该文件
+      （内容根下的 config/ → 向上层目录找项目里的那一份 → AISERVER_SECRETS_FILE 指定路径）。
+  -->
+  <ItemGroup>
+    <Content Update="config/secrets.local.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
+    <Content Update="config/secrets.local.example.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

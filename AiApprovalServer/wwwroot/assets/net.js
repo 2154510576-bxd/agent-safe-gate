@@ -1,14 +1,4 @@
-/*
- * net.js —— 前端 API 客户端 + 请求签名 + 极简 DOM 工具。
- *
- * 关键点（和服务端 SecurityMiddleware 一一对应）：
- *   1) 认证走 Authorization: Bearer，**不使用 Cookie** —— 浏览器不会自动携带凭据，跨站请求天然无法冒用身份；
- *   2) 所有写请求（POST/PUT/PATCH/DELETE）必须签名：
- *        X-Timestamp = 毫秒时间戳
- *        X-Nonce     = 16+ 位随机串（服务端在时间窗内一次性校验，防重放）
- *        X-Signature = base64(HMAC-SHA256(signKey, "METHOD\nPATH?QUERY\nTS\nNONCE\nSHA256HEX(body)"))
- *   3) 令牌只放在 sessionStorage：关闭标签页即失效，降低共享电脑上的残留风险。
- */
+//前端 API 客户端与请求签名
 (function (global) {
   'use strict';
 
@@ -25,16 +15,19 @@
     try { global.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(session)); } catch (e) { /* 隐私模式忽略 */ }
   }
 
+  //字符串转 UTF-8 字节
   function utf8(text) {
     return (global.TextEncoder) ? new global.TextEncoder().encode(text) : global.CryptoLite.utf8Bytes(text);
   }
 
+  //字节转 base64
   function toBase64(bytes) {
     var binary = '';
     for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     return global.btoa(binary);
   }
 
+  //字节转十六进制
   function toHex(bytes) {
     var s = '';
     for (var i = 0; i < bytes.length; i++) s += (bytes[i] < 16 ? '0' : '') + bytes[i].toString(16);
@@ -43,6 +36,7 @@
 
   var subtle = global.crypto && global.crypto.subtle ? global.crypto.subtle : null;
 
+  //摘要转十六进制
   function sha256Hex(text) {
     if (subtle) {
       return subtle.digest('SHA-256', utf8(text)).then(function (buf) {
@@ -52,6 +46,7 @@
     return Promise.resolve(global.CryptoLite.sha256Hex(text));
   }
 
+  //计算 HMAC 签名
   function hmacBase64(keyText, message) {
     if (subtle) {
       return subtle.importKey('raw', utf8(keyText), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
@@ -62,6 +57,7 @@
     return Promise.resolve(global.CryptoLite.hmacSha256Base64(keyText, message));
   }
 
+  //生成随机 nonce
   function randomNonce() {
     var bytes = new Uint8Array(18);
     if (global.crypto && global.crypto.getRandomValues) global.crypto.getRandomValues(bytes);
@@ -72,6 +68,7 @@
     return s;
   }
 
+  //构造请求头与签名
   function buildHeaders(method, pathWithQuery, bodyText) {
     var headers = { 'Accept': 'application/json' };
     if (session.token) headers['Authorization'] = 'Bearer ' + session.token;
@@ -93,6 +90,7 @@
     });
   }
 
+  //发送请求并处理错误
   function request(path, options) {
     options = options || {};
     var method = (options.method || 'GET').toUpperCase();
@@ -122,6 +120,7 @@
           error.status = response.status;
           error.code = payload && payload.code;
           if (response.status === 401 && !options.keepSession) {
+            //登录失效，通知页面
             API.clear();
             global.dispatchEvent(new CustomEvent('session-expired', { detail: error.code }));
           }
@@ -161,9 +160,8 @@
     }
   };
 
-  // ---------------------------------------------------------------- 极简 DOM 工具
-  // 所有用户可见的文本一律走 textContent，绝不使用 innerHTML——
-  // 这是前端抗 XSS 的根基（配合服务端 CSP: script-src 'self'）。
+  //极简 DOM 与格式化工具
+  //创建元素并写入文本
   function el(tag, className, text) {
     var node = document.createElement(tag);
     if (className) node.className = className;
@@ -171,10 +169,12 @@
     return node;
   }
 
+  //格式化 JSON
   function json(value) {
     try { return JSON.stringify(value, null, 2); } catch (e) { return String(value); }
   }
 
+  //格式化时间
   function fmtTime(value) {
     if (!value) return '-';
     var d = new Date(value);
@@ -184,6 +184,7 @@
            pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
   }
 
+  //任务状态配色
   function statusClass(status) {
     switch (status) {
       case 'EXECUTED': return 'ok';
@@ -195,6 +196,7 @@
     }
   }
 
+  //风险等级配色
   function riskClass(risk) {
     switch (risk) {
       case 'LOW': return 'ok';
@@ -205,6 +207,7 @@
     }
   }
 
+  //弹出提示条
   function toast(message, kind) {
     var host = document.getElementById('toast-host');
     if (!host) return;
@@ -216,11 +219,36 @@
     }, 4200);
   }
 
+  //清空子节点
   function clear(node) {
     while (node.firstChild) node.removeChild(node.firstChild);
     return node;
   }
 
+  //还原 \uXXXX 转义
+  function unescapeUnicode(value) {
+    if (typeof value !== 'string' || value.indexOf('\\u') < 0) return value;
+
+    return value.replace(/\\u([0-9a-fA-F]{4})/g, function (match, hex) {
+      return String.fromCharCode(parseInt(hex, 16));
+    }).replace(/\\u\{([0-9a-fA-F]{1,6})\}/g, function (match, hex) {
+      return String.fromCodePoint(parseInt(hex, 16));
+    });
+  }
+
+  //递归还原转义
+  function unescapeDeep(value) {
+    if (typeof value === 'string') return unescapeUnicode(value);
+    if (Array.isArray(value)) return value.map(unescapeDeep);
+    if (value && typeof value === 'object') {
+      var out = {};
+      Object.keys(value).forEach(function (k) { out[k] = unescapeDeep(value[k]); });
+      return out;
+    }
+    return value;
+  }
+
+  //导出全局 API 与工具
   global.API = API;
   global.U = {
     el: el,
@@ -229,6 +257,8 @@
     statusClass: statusClass,
     riskClass: riskClass,
     toast: toast,
-    clear: clear
+    clear: clear,
+    unescapeUnicode: unescapeUnicode,
+    unescapeDeep: unescapeDeep
   };
 })(globalThis);

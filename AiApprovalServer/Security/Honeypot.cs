@@ -1,14 +1,6 @@
 namespace AiApproval.Security;
 
-/// <summary>
-/// 蜜罐层。攻击者拿到一个域名后最典型的动作就是"扫后台"：
-///   /.env、/admin.php、/wp-login.php、/phpmyadmin、/actuator/env、/.git/config ...
-/// 正常用户永远不会请求这些路径，所以命中即是攻击信号。
-///
-/// 策略：命中即记分（权重高于普通 WAF 命中），累计到阈值自动封禁；
-/// 并且对 /admin.php 提供一个"看起来像老后台"的诱饵登录页：
-/// 任何提交动作立刻封禁该 IP 并写入审计（真实密码只会落到攻击者自己的手里）。
-/// </summary>
+//蜜罐层：扫描器路径命中即记分
 public static class Honeypot
 {
     public static readonly string[] DecoyPaths =
@@ -21,6 +13,7 @@ public static class Honeypot
         "/owa/auth/logon.aspx", "/hudson", "/solr/admin", "/.svn/entries", "/web.config",
     };
 
+    //是否命中诱饵路径
     public static bool IsDecoy(string? path, out string label)
     {
         var normalized = (path ?? "").TrimEnd('/');
@@ -36,7 +29,7 @@ public static class Honeypot
             }
         }
 
-        // 目录型探测：/wp-admin/xxx、/.git/xxx
+        //目录型探测
         foreach (var prefix in new[] { "/wp-admin/", "/.git/", "/.svn/", "/phpmyadmin/" })
         {
             if ((path ?? "").StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
@@ -50,7 +43,7 @@ public static class Honeypot
         return false;
     }
 
-    /// <summary>诱饵页：刻意做成"上一个时代"的后台样式，不含任何真实接口。</summary>
+    //诱饵后台登录页
     public static string DecoyConsolePage() => """
         <!DOCTYPE html>
         <html lang="zh-CN">
@@ -83,7 +76,7 @@ public static class Honeypot
         </html>
         """;
 
-    /// <summary>robots.txt 本身就是诱饵：合法的搜索引擎遵守，扫描器则会去抓取 Disallow 里的路径。</summary>
+    //robots.txt 也是诱饵
     public static string RobotsTxt() => """
         User-agent: *
         Disallow: /admin

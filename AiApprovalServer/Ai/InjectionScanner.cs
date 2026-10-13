@@ -2,15 +2,7 @@ using System.Text.RegularExpressions;
 
 namespace AiApproval.Ai;
 
-/// <summary>
-/// 输入侧注入检测。
-///
-/// 设计取舍：**检测到注入特征不等于直接拒绝**。
-/// 直接字符串拦截有两个问题：① 误杀（用户可能只是在讨论"忽略以上指令"这句话本身）；
-/// ② 掩盖真实风险（真正危险的模型不会用明显的关键词）。
-/// 因此这里的结论只有一个用途：**把状态变更类操作强制升级为人工审批**，并写进审计与审批上下文。
-/// 也就是说，注入检测提高的是"人类看一眼"的概率，而不是替代防线。
-/// </summary>
+//输入侧注入检测
 public static class InjectionScanner
 {
     private static readonly (string Label, Regex Rx)[] Rules =
@@ -28,6 +20,7 @@ public static class InjectionScanner
         ("数据外发诱导", new Regex(@"(?i)(把|将)[^。\n]{0,10}(数据|名单|客户|合同|备份)[^。\n]{0,10}(发到|上传到|发送到|导出到)[^。\n]{0,20}(邮箱|外网|网盘|外部|http)", RegexOptions.Compiled, TimeSpan.FromMilliseconds(50))),
     };
 
+    //扫描注入特征（不阻断，只升级审批）
     public static List<string> Scan(string? text)
     {
         var flags = new List<string>();

@@ -1,7 +1,4 @@
-/*
- * app.js —— 业务工作台（用户 / 员工）。
- * 渲染原则：所有来自服务端或用户输入的文本一律通过 textContent 写入 DOM，绝不拼 HTML 字符串。
- */
+//业务工作台页面
 (function () {
   'use strict';
 
@@ -13,7 +10,7 @@
     currentFile: null
   };
 
-  // ------------------------------------------------------------------ 启动
+  //页面启动
   function boot() {
     API.publicGet('/api/public/health').then(function (res) {
       state.health = res.data;
@@ -54,6 +51,7 @@
     }
   }
 
+  //切回登录页
   function showLogin() {
     document.getElementById('login-view').hidden = false;
     document.getElementById('console-view').hidden = true;
@@ -61,6 +59,7 @@
     API.clear();
   }
 
+  //进入工作台
   function enterConsole() {
     var user = API.session().user;
     document.getElementById('login-view').hidden = true;
@@ -79,7 +78,7 @@
     }
   }
 
-  // ------------------------------------------------------------------ 登录 / 注册
+  //登录与注册
   function login() {
     var userName = document.getElementById('login-user').value.trim();
     var password = document.getElementById('login-pass').value;
@@ -95,6 +94,7 @@
     });
   }
 
+  //提交注册
   function register() {
     var payload = {
       userName: document.getElementById('reg-user').value.trim(),
@@ -112,7 +112,7 @@
     });
   }
 
-  // ------------------------------------------------------------------ 对话
+  //渲染示例问句
   function renderChips() {
     var host = U.clear(document.getElementById('quick-chips'));
     var user = API.session().user || {};
@@ -147,6 +147,7 @@
     });
   }
 
+  //追加一条消息
   function addMessage(kind, text) {
     var log = document.getElementById('chat-log');
     var wrap = el('div', 'msg ' + kind);
@@ -157,6 +158,7 @@
     return wrap;
   }
 
+  //渲染任务动作卡片
   function addActionCard(container, data) {
     var card = el('div', 'action-card');
 
@@ -178,7 +180,7 @@
     if (data.reviewVerdict) kv('结构审核', data.reviewVerdict);
     if (data.actionSummary) kv('动作摘要', data.actionSummary);
 
-    // 多步执行轨迹：像代码助手那样展示"先搜 → 再读 → 再写"
+    //多步执行轨迹
     if (data.steps && data.steps.length) {
       var chain = el('div', 'steps');
       chain.appendChild(el('div', 'steps-title', '执行步骤（' + data.steps.length + ' 步）'));
@@ -200,7 +202,7 @@
       card.appendChild(chain);
     }
 
-    // 系统做的"口语 → 规范值"翻译（例如「重要」→ 铂金）
+    //口语值映射成规范值
     if (data.translations && data.translations.length) {
       kv('参数映射', data.translations.join('；'), 'diff-add');
     }
@@ -221,6 +223,7 @@
     container.appendChild(card);
   }
 
+  //发送对话请求
   function send() {
     var input = document.getElementById('chat-input');
     var message = input.value.trim();
@@ -248,7 +251,7 @@
     });
   }
 
-  // ------------------------------------------------------------------ 侧栏标签
+  //切换侧栏标签
   function switchTab(name) {
     var tabs = document.querySelectorAll('#side-tabs .tab');
     Array.prototype.forEach.call(tabs, function (t) {
@@ -265,6 +268,7 @@
     else if (name === 'perm') loadPermissions(body);
   }
 
+  //加载任务列表
   function loadTasks(body) {
     API.get('/api/agent/tasks').then(function (res) {
       U.clear(body);
@@ -280,17 +284,15 @@
         meta.appendChild(document.createTextNode('  ' + U.fmtTime(task.createdAt) + '  风险 ' + task.riskLabel + '  ' + task.id));
         item.appendChild(meta);
 
-        // 待审批的任务可以自己撤回（撤回只取消排队，不执行任何动作）
+        //待审批任务可撤回
         if (task.status === 'PENDING_APPROVAL') {
           var actions = el('div', 'row tight');
           var cancel = el('button', 'small ghost', '撤回申请');
           cancel.addEventListener('click', function (e) {
             e.stopPropagation();
             cancel.disabled = true;
-            API.post('/api/biz/action', {
-              tool: 'cancel_my_task',
-              args: { task_id: task.id },
-              reason: '用户在任务列表里撤回'
+            API.post('/api/agent/chat', {
+              message: '撤回我最新那条申请（任务号 ' + task.id + '）理由：用户在任务列表里撤回'
             }).then(function (res) {
               U.toast((res.data && res.data.reply) || '已撤回申请', 'ok');
               switchTab('tasks');
@@ -311,6 +313,7 @@
     }).catch(function (err) { body.textContent = '加载失败：' + err.message; });
   }
 
+  //打开任务详情
   function showTaskDetail(id) {
     API.get('/api/agent/tasks/' + encodeURIComponent(id)).then(function (res) {
       var task = res.data;
@@ -345,6 +348,7 @@
     }).catch(function (err) { U.toast(err.message, 'bad'); });
   }
 
+  //加载文件列表
   function loadFiles(body, scope, path) {
     API.get('/api/agent/files?scope=' + encodeURIComponent(scope) + '&path=' + encodeURIComponent(path))
       .then(function (res) {
@@ -389,6 +393,7 @@
       });
   }
 
+  //查看文件内容
   function viewFile(scope, path) {
     API.get('/api/agent/files/content?scope=' + encodeURIComponent(scope) + '&path=' + encodeURIComponent(path))
       .then(function (res) {
@@ -400,6 +405,7 @@
       }).catch(function (err) { U.toast(err.message, 'bad'); });
   }
 
+  //加载通知
   function loadNotices(body) {
     API.get('/api/agent/notices').then(function (res) {
       U.clear(body);
@@ -419,6 +425,7 @@
     }).catch(function (err) { body.textContent = '加载失败：' + err.message; });
   }
 
+  //加载版本记录
   function loadVersions(body) {
     API.get('/api/agent/versions').then(function (res) {
       U.clear(body);
@@ -443,6 +450,7 @@
     }).catch(function (err) { body.textContent = '加载失败：' + err.message; });
   }
 
+  //加载权限与工具
   function loadPermissions(body) {
     API.get('/api/agent/tools').then(function (res) {
       U.clear(body);
@@ -468,7 +476,7 @@
     }).catch(function (err) { body.textContent = '加载失败：' + err.message; });
   }
 
-  // ------------------------------------------------------------------ 弹层
+  //打开弹层
   function openModal(title, contentNode) {
     var host = U.clear(document.getElementById('modal-host'));
     var mask = el('div', 'modal-mask');
@@ -489,7 +497,7 @@
     host.appendChild(mask);
   }
 
-  // ------------------------------------------------------------------ 事件绑定
+  //绑定页面事件
   function bind() {
     document.getElementById('btn-login').addEventListener('click', login);
     document.getElementById('login-pass').addEventListener('keydown', function (e) { if (e.key === 'Enter') login(); });
@@ -532,6 +540,7 @@
     });
   }
 
+  //打开使用说明
   function showHelp() {
     API.get('/api/agent/help').then(function (res) {
       var body = el('div', null);

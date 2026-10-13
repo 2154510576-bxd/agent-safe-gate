@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>星云游安全执行平台 · 财务工作台</title>
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<div id="toast-host"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-title">星云游安全执行平台 · 财务工作台</span>
+    <span class="brand-sub">报销单审核 / 修改 / 查看原表</span>
+  </div>
+  <div class="topbar-spacer"></div>
+  <div class="userbox" id="userbox" hidden>
+    <span id="whoami" class="hint"></span>
+    <span class="badge info">财务工作台</span>
+    <a class="hint" href="/">业务工作台</a>
+    <a class="hint" href="/admin">管理后台</a>
+    <button id="btn-logout" class="small ghost" type="button">退出登录</button>
+  </div>
+</header>
+
+<!-- 登录页 -->
+<main id="login-view" class="login-wrap">
+  <div class="banner warn" id="login-banner">
+    该页面供财务部与管理员使用。审核、修改与删除都会写入带哈希链的审计日志；按日志回退在管理后台执行，需要管理员的回退权限。
+  </div>
+
+  <div class="card">
+    <div class="card-head">登录</div>
+    <div class="card-body">
+      <label class="field"><span>用户名</span><input type="text" id="login-user" autocomplete="username" maxlength="32"></label>
+      <label class="field"><span>口令</span><input type="password" id="login-pass" autocomplete="current-password" maxlength="128"></label>
+      <div class="row">
+        <button class="primary" id="btn-login" type="button">登录</button>
+        <span class="hint">连续失败会锁定账号并累计 IP 攻击分，达到阈值自动封禁。</span>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- 无权访问页 -->
+<main id="deny-view" class="login-wrap" hidden>
+  <div class="banner bad" id="deny-banner">当前账号没有财务工作台权限。</div>
+  <div class="card">
+    <div class="card-head">无权访问财务工作台</div>
+    <div class="card-body">
+      <div class="hint" id="deny-detail">该页面只对财务部、管理员与超级管理员开放。</div>
+      <div class="row">
+        <a class="hint" href="/">回到业务工作台</a>
+        <a class="hint" href="/admin">前往管理后台</a>
+        <button class="small ghost" id="btn-deny-logout" type="button">退出登录</button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- 财务工作台 -->
+<main id="finance-view" hidden>
+  <div class="layout">
+    <section class="col-main">
+      <div class="card">
+        <div class="card-head">
+          报销单列表
+          <span class="spacer"></span>
+          <span class="hint" id="count-label">尚未加载</span>
+          <button class="small" id="btn-refresh" type="button">刷新</button>
+        </div>
+        <div class="card-body">
+          <div class="row">
+            <select id="filter-status" data-placeholder="全部状态"><option value="">全部状态</option></select>
+            <select id="filter-type" data-placeholder="全部报销类型"><option value="">全部报销类型</option></select>
+            <select id="filter-department" data-placeholder="全部部门"><option value="">全部部门</option></select>
+            <input type="text" id="filter-keyword" class="grow" maxlength="32" placeholder="按单号或申请人筛选">
+            <button class="small ghost" id="btn-clear-filter" type="button">清除筛选</button>
+          </div>
+          <div class="divider"></div>
+          <div id="list-host" class="list">加载中</div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="col-side">
+      <div class="card">
+        <div class="card-head">单据详情与操作</div>
+        <div class="card-body" id="detail-host">
+          <div class="empty">在左侧列表选择一条报销单</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">报销契约元数据</div>
+        <div class="card-body">
+          <div class="row">
+            <a class="hint" id="finance-feishu-table" target="_blank" rel="noopener noreferrer" hidden>在飞书中打开原表</a>
+            <span class="hint" id="finance-feishu-note" hidden></span>
+          </div>
+          <div class="hint">判定口径（服务端规则，前端仅展示）</div>
+          <div id="meta-rules" class="hint">加载中</div>
+          <div class="divider"></div>
+          <div class="hint" id="meta-fields">加载中</div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</main>
+
+<!-- 弹层容器 -->
+<div id="modal-host"></div>
+
+<script src="assets/crypto-lite.js"></script>
+<script src="assets/net.js"></script>
+<script src="assets/finance.js"></script>
+</body>
+</html>

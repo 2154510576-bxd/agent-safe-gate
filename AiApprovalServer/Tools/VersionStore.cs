@@ -4,13 +4,7 @@ using AiApproval.Security;
 
 namespace AiApproval.Tools;
 
-/// <summary>
-/// 版本库：执行前的"旧状态"快照 + 差异(Diff) + 反向操作数据(Undo Log)。
-///
-/// 快照存储采用内容寻址（blob 文件名 = SHA-256），同一内容只存一份：
-///   * 相同文件被反复覆盖不会把磁盘写爆；
-///   * 顺手获得完整性校验能力（读出后可重新算摘要比对，发现文件被篡改）。
-/// </summary>
+//版本快照与回退
 public sealed class VersionStore
 {
     private readonly JsonStore _store;
@@ -23,10 +17,7 @@ public sealed class VersionStore
         _cfg = cfg;
     }
 
-    /// <summary>
-    /// 记录一次"可回退的执行"。
-    /// previousBytes 为 null 表示目标原本不存在（回退 = 删除）；newBytes 为 null 表示被删除（回退 = 恢复）。
-    /// </summary>
+    //记录一次可回退的执行
     public async Task<VersionRecord> RecordAsync(string taskId, string userId, string userName, string kind,
         string operation, string target, byte[]? previousBytes, byte[]? newBytes,
         string undoLogJson, string compensateAction = "")
@@ -58,6 +49,7 @@ public sealed class VersionStore
         if (newBytes is not null)
             record.NewHash = Crypto.Sha256Hex(newBytes);
 
+        //生成差异文本
         var oldText = AsText(previousBytes);
         var newText = AsText(newBytes);
         if (oldText is null || newText is null)
@@ -83,6 +75,7 @@ public sealed class VersionStore
         return record;
     }
 
+    //内容寻址写快照
     private async Task WriteBlobIfMissingAsync(string blobName, byte[] content)
     {
         var relative = StoreNames.Blobs + "/" + blobName;
@@ -99,13 +92,16 @@ public sealed class VersionStore
         finally { _lock.Release(); }
     }
 
+    //读快照文件
     public async Task<byte[]?> ReadBlobAsync(string? blobName)
     {
+        //校验文件名
         if (string.IsNullOrWhiteSpace(blobName)) return null;
         if (blobName.Contains("..") || blobName.Contains('/') || blobName.Contains('\\')) return null;
         return await _store.ReadBlobAsync(StoreNames.Blobs + "/" + blobName).ConfigureAwait(false);
     }
 
+    //列版本记录
     public async Task<List<VersionRecord>> ListAsync(string? userId = null, int limit = 100)
     {
         var all = await _store.ReadListAsync<VersionRecord>(StoreNames.Versions).ConfigureAwait(false);
@@ -115,12 +111,14 @@ public sealed class VersionStore
         return query.Take(Math.Clamp(limit, 1, 500)).ToList();
     }
 
+    //按 id 取版本
     public async Task<VersionRecord?> GetAsync(string id)
     {
         var all = await _store.ReadListAsync<VersionRecord>(StoreNames.Versions).ConfigureAwait(false);
         return all.FirstOrDefault(v => v.Id == id);
     }
 
+    //更新版本记录
     public async Task<bool> UpdateAsync(string id, Action<VersionRecord> mutate)
         => await _store.MutateAsync<VersionRecord, bool>(StoreNames.Versions, list =>
         {
@@ -130,14 +128,11 @@ public sealed class VersionStore
             return true;
         }).ConfigureAwait(false);
 
+    //统计版本条数
     public async Task<int> CountAsync()
         => (await _store.ReadListAsync<VersionRecord>(StoreNames.Versions).ConfigureAwait(false)).Count;
 
-    /// <summary>
-    /// 尝试按 UTF-8 解码；包含 NUL 字节（典型的二进制特征）时返回 null。
-    /// 注意：bytes 为 null 表示"该文件原本不存在"（新建操作），此时应按**空文本**处理——
-    /// 否则新建出来的纯文本文件会被误判成"二进制"，Diff 就没了（实测踩到的 bug）。
-    /// </summary>
+    //按 UTF-8 解码文本
     private static string? AsText(byte[]? bytes)
     {
         if (bytes is null) return "";

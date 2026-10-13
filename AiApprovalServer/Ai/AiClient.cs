@@ -15,14 +15,7 @@ public sealed class AiCallResult
     public int CompletionTokens { get; init; }
 }
 
-/// <summary>
-/// 异步 AI API 客户端（对照 StarGame 的 AIHelper / AITool 思路重写）：
-///   * 全程 async/await + CancellationToken，不阻塞请求线程；
-///   * 失败隔离：任何异常都转成"AI 不可用"这一确定结论，绝不让"审核服务挂了"变成"操作被放行"；
-///   * 经济型 DoS 防护：全局并发信号量 + 每用户每日配额（在 UserService 里扣减）；
-///   * SSRF 防护：只允许 https、只允许配置里写死的 API 主机、拒绝私网/回环/元数据地址；
-///   * 密钥只出现在请求头里，任何日志/响应/审计都不落密钥。
-/// </summary>
+//AI 客户端
 public sealed class AiClient
 {
     private static readonly string[] DefaultAllowedHosts = { "api.deepseek.com" };
@@ -45,17 +38,14 @@ public sealed class AiClient
 
     public string Model => _cfg.Ai.Model;
 
-    /// <summary>最近一次成功调用时间（用于对外如实展示"AI 到底通不通"）</summary>
+    //最近一次成功调用时间
     public DateTime? LastSuccessAt { get; private set; }
 
-    /// <summary>最近一次失败时间与原因（脱敏，只含异常类型与简短描述）</summary>
+    //最近一次失败时间与原因（脱敏）
     public DateTime? LastFailureAt { get; private set; }
     public string LastError { get; private set; } = "";
 
-    /// <summary>
-    /// 对外状态：off（未配置）/ degraded（配置了但最近调用失败）/ online（最近调用成功或尚未调用）。
-    /// 注意：仅"配置了密钥"不等于"能用"，所以这里区分开，避免界面给出误导性的"AI 在线"。
-    /// </summary>
+    //对外状态：off / degraded / online
     public string Status
     {
         get
@@ -66,11 +56,7 @@ public sealed class AiClient
         }
     }
 
-    /// <summary>
-    /// 出站主机白名单：默认只允许官方的 api.deepseek.com。
-    /// 要接自建/私有模型网关（vLLM / Ollama / 内部网关）必须在 Ai:AllowedHosts 中**显式**放行——
-    /// 这样既支持私有部署，也不会因为"配置里能改个 URL"就把服务变成 SSRF 跳板。
-    /// </summary>
+    //出站主机白名单（自建网关需显式放行）
     private HashSet<string> AllowedHosts()
     {
         var configured = (_cfg.Ai.AllowedHosts ?? "")
@@ -81,6 +67,7 @@ public sealed class AiClient
         return configured.Count > 0 ? configured : DefaultAllowedHosts.ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
+    //校验接口地址与协议
     public bool IsUrlAllowed(out string reason)
     {
         reason = "";
@@ -98,7 +85,7 @@ public sealed class AiClient
 
         if (string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) return true;
 
-        // 明文 http 只放给"已显式白名单 + 本机/内网"的自建网关
+        //明文 http 只放本机 / 内网网关
         if (string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
             && (uri.IsLoopback
                 || string.Equals(uri.Host, "localhost", StringComparison.OrdinalIgnoreCase)
@@ -109,9 +96,7 @@ public sealed class AiClient
         return false;
     }
 
-    /// <summary>
-    /// 单轮对话（不做会话记忆；记忆由调用方维护，便于隔离不同用户/不同视角的上下文）。
-    /// </summary>
+    //单轮对话
     public async Task<AiCallResult> CompleteAsync(string systemPrompt, string userContent,
         double temperature = 0.2, int? maxTokens = null, bool jsonMode = true, CancellationToken ct = default)
     {
@@ -163,7 +148,7 @@ public sealed class AiClient
 
                     if (!response.IsSuccessStatusCode)
                     {
-                        // 只保留状态码，绝不把上游返回体（可能含密钥/内部信息）抛给调用方
+                        //只保留状态码，不回传上游响应体
                         lastError = $"AI 接口返回 {(int)response.StatusCode}";
                         if ((int)response.StatusCode is >= 400 and < 500 && (int)response.StatusCode != 429)
                             break;
@@ -194,7 +179,7 @@ public sealed class AiClient
                 }
                 catch (Exception ex)
                 {
-                    // 记录足够定位问题、但不含密钥的信息（异常文本里不会带 Authorization 头）
+                    //只记异常类型与描述，不含密钥
                     lastError = "AI 调用异常：" + Describe(ex);
                 }
 
@@ -213,7 +198,7 @@ public sealed class AiClient
         return new AiCallResult { Ok = false, Error = lastError, LatencyMs = stopwatch.ElapsedMilliseconds };
     }
 
-    /// <summary>把异常链压成一行短描述（排障够用，且不含任何密钥/请求头内容）。</summary>
+    //异常链压成一行
     private static string Describe(Exception ex)
     {
         var parts = new List<string>();
@@ -231,6 +216,7 @@ public sealed class AiClient
             => string.IsNullOrEmpty(message) ? "" : message.Length <= 120 ? message : message[..120];
     }
 
+    //解析响应取正文与用量
     private static (string? Content, int PromptTokens, int CompletionTokens) ParseResponse(string raw)    {
         try
         {
@@ -259,6 +245,7 @@ public sealed class AiClient
         }
     }
 
+    //是否私网 / 回环 / 元数据地址
     private static bool IsPrivate(IPAddress ip)
     {
         if (IPAddress.IsLoopback(ip)) return true;

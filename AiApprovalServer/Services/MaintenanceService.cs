@@ -3,12 +3,7 @@ using AiApproval.Services;
 
 namespace AiApproval.Services;
 
-/// <summary>
-/// 后台维护任务：
-///   * 定期把超时的待审批任务置为 EXPIRED（避免"几个月前的旧审批链接"仍然可用）；
-///   * 清理工作区里的 .tmp 残留（原子写的中间文件）；
-///   * 打印一次安全态势快照到日志，方便运维确认防线是否在工作。
-/// </summary>
+//后台维护任务
 public sealed class MaintenanceService : BackgroundService
 {
     private readonly TaskService _tasks;
@@ -22,9 +17,10 @@ public sealed class MaintenanceService : BackgroundService
         _logger = logger;
     }
 
+    //维护循环（5 分钟一轮）
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // 启动后先等 10 秒，别和"首次播种/首屏请求"抢资源
+        //启动后先等 10 秒
         await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken).ConfigureAwait(false);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -44,6 +40,7 @@ public sealed class MaintenanceService : BackgroundService
         }
     }
 
+    //清理超时的临时文件
     private void CleanTempFiles()
     {
         try

@@ -5,17 +5,7 @@ using AiApproval.Tools;
 
 namespace AiApproval.Services;
 
-/// <summary>
-/// 任务服务：审批状态机 + 异步持久化 + 执行编排。
-///
-/// 状态迁移（只允许这些路径）：
-///   PENDING_APPROVAL --(管理员同意 / 邮件签名令牌同意)--> EXECUTING --> EXECUTED | FAILED
-///   PENDING_APPROVAL --(管理员打回)--> REJECTED_ADMIN
-///   PENDING_APPROVAL --(超时)--> EXPIRED
-///   (规则/AI 拦截) -> REJECTED_RULE / REJECTED_AI（终结态）
-///
-/// "先落盘再执行"是硬要求：即使进程在执行过程中被杀死，也能从任务记录里知道发生了什么。
-/// </summary>
+//任务服务：审批与执行
 public sealed class TaskService
 {
     private readonly JsonStore _store;
@@ -42,6 +32,7 @@ public sealed class TaskService
         _rawInputKey = cfg.DeriveKey("raw-input");
     }
 
+    //建任务并落盘
     public async Task<AgentTask> CreateAsync(RequestIdentity identity, IntentPlan plan, RuleEvaluation eval,
         ReviewOutcome review, string rawInput, List<string> injectionFlags, bool requiresApproval)
     {
@@ -65,7 +56,7 @@ public sealed class TaskService
             ApprovalExpiresAt = DateTime.UtcNow.AddMinutes(_cfg.ApprovalTokenMinutes),
         };
 
-        // 原始输入加密存放：管理员审批时解密展示，文件被拖走也读不到用户原话
+        //原始输入加密存放
         task.RawInputCipher = Crypto.AesGcmEncrypt(rawInput, _rawInputKey, "task-raw|" + task.Id);
 
         if (requiresApproval)
@@ -79,7 +70,7 @@ public sealed class TaskService
                 $"【待审批】{task.UserName} 申请 {ToolCatalog.Get(task.ToolName)?.Title ?? task.ToolName}",
                 BuildNoticeBody(task, link),
                 task.Id,
-                "",                 // 这是"发给审批人"的通知，不属于提交人的收件箱（避免混进"我的通知"）
+                "",                 //发给审批人的通知，不进提交人收件箱
                 task.UserName,
                 link).ConfigureAwait(false);
         }
@@ -97,6 +88,7 @@ public sealed class TaskService
         return task;
     }
 
+    //拼审批通知正文
     private static string BuildNoticeBody(AgentTask task, string link) => string.Join('\n', new[]
     {
         "有新的高危操作等待审批。",
@@ -117,10 +109,7 @@ public sealed class TaskService
         $"（该链接已签名，{task.ApprovalExpiresAt:yyyy-MM-dd HH:mm} UTC 前有效，且只能使用一次）",
     });
 
-    /// <summary>
-    /// 记录一次"被拦截/被拒绝"的任务（不执行、不建审批链接）。
-    /// 被拦截同样要留痕：攻击者的每次尝试都是安全运营的重要信号。
-    /// </summary>
+    //记录被拦截的任务
     public async Task<AgentTask> CreateRejectedAsync(RequestIdentity identity, IntentPlan plan, RuleEvaluation eval,
         ReviewOutcome review, string rawInput, List<string> injectionFlags, string status, string reason)
     {
@@ -160,6 +149,7 @@ public sealed class TaskService
         return task;
     }
 
+    //列出任务
     public async Task<List<AgentTask>> ListAsync(string? userId = null, string? status = null, int limit = 100)
     {
         var all = await _store.ReadListAsync<AgentTask>(StoreNames.Tasks).ConfigureAwait(false);
@@ -169,22 +159,24 @@ public sealed class TaskService
         return query.Take(Math.Clamp(limit, 1, 300)).ToList();
     }
 
+    //按 id 取任务
     public async Task<AgentTask?> GetAsync(string id)
     {
         var all = await _store.ReadListAsync<AgentTask>(StoreNames.Tasks).ConfigureAwait(false);
         return all.FirstOrDefault(t => t.Id == id);
     }
 
+    //统计待审批数
     public async Task<int> CountPendingAsync()
         => (await ListAsync(null, TaskState.PendingApproval, 300).ConfigureAwait(false)).Count;
 
-    /// <summary>把用户原始输入解密出来（只在管理端审批上下文中调用）。</summary>
+    //解密用户原始输入
     public string DecryptRawInput(AgentTask task)
         => string.IsNullOrEmpty(task.RawInputCipher)
             ? ""
             : Crypto.AesGcmDecrypt(task.RawInputCipher, _rawInputKey, "task-raw|" + task.Id) ?? "（解密失败：密钥已更换或数据被篡改）";
 
-    /// <summary>自动执行（只读/低风险工具，或规则与审核都放行的操作）。</summary>
+    //自动执行任务
     public async Task<AgentTask> ExecuteAsync(AgentTask task, string via)
     {
         var result = await _harness.ExecuteAsync(task).ConfigureAwait(false);
@@ -213,11 +205,7 @@ public sealed class TaskService
         return updated ?? task;
     }
 
-    /// <summary>
-    /// 管理员裁决。via = admin-ui / email-token，用于审计区分"人工点按钮"和"点邮件链接"。
-    /// 并发保护：抢到"从 PENDING_APPROVAL 迁移到 EXECUTING / REJECTED_ADMIN 的那一次写"才允许继续。
-    /// 说明：批准与打回都走这一个入口（打回即把状态置为 REJECTED_ADMIN 并记 <c>approval.reject</c> 审计）。
-    /// </summary>
+    //管理员裁决（批准与打回同一入口）
     public async Task<(bool Ok, string Error, AgentTask? Task)> DecideAsync(string taskId, bool approve, string reason,
         RequestIdentity admin, string via)
     {
@@ -271,10 +259,7 @@ public sealed class TaskService
         return (true, "", executed);
     }
 
-    /// <summary>
-    /// 给提交人写一条站内通知（审批通过/打回/过期/即将过期）。
-    /// 以前只有"给审批人发待审批通知"，提交人这边静默——用户任务挂了 4 小时自动作废都不知道，这是体验硬伤。
-    /// </summary>
+    //通知提交人
     private async Task NotifyOwnerAsync(AgentTask task, string outcome, string detail)
     {
         var user = await _users.FindByIdAsync(task.UserId).ConfigureAwait(false);
@@ -286,6 +271,7 @@ public sealed class TaskService
             task.Id, task.UserId, task.UserName, "").ConfigureAwait(false);
     }
 
+    //取执行摘要
     private static string ExtractResultSummary(string resultJson)
     {
         var dto = AppJson.Deserialize<ExecuteSummaryDto>(resultJson);
@@ -298,7 +284,7 @@ public sealed class TaskService
         public string? Summary { get; set; }
     }
 
-    /// <summary>邮件签名令牌审批（防 IDOR：令牌与任务绑定、一次性、有有效期）。</summary>
+    //邮件令牌审批（一次性、有有效期）
     public async Task<(bool Ok, string Error)> DecideByTokenAsync(string taskId, string token, string reason, RequestIdentity admin)
     {
         var task = await GetAsync(taskId).ConfigureAwait(false);
@@ -332,15 +318,12 @@ public sealed class TaskService
         return (ok, error);
     }
 
-    /// <summary>
-    /// 超时处理：① 到期前 30 分钟给提交人发一次"即将过期"提醒；② 已过期的作废并通知提交人。
-    /// 以前是"静默作废"，用户以为还在排队。这里强调"可重新提交/可撤回"。
-    /// </summary>
+    //超时处理：先提醒，后作废
     public async Task<int> ExpireOverdueAsync()
     {
         var warnWindow = TimeSpan.FromMinutes(30);
 
-        // ① 即将过期提醒（每条只提醒一次）
+        //即将过期提醒（每条只提醒一次）
         var toWarn = await _store.MutateAsync<AgentTask, List<string>>(StoreNames.Tasks, list =>
         {
             var ids = new List<string>();
@@ -364,7 +347,7 @@ public sealed class TaskService
                 + "如仍需执行请在后台催办；不需要了可以直接撤回（撤回不执行任何动作）。").ConfigureAwait(false);
         }
 
-        // ② 过期作废 + 通知提交人
+        //过期作废并通知提交人
         var expired = await _store.MutateAsync<AgentTask, List<string>>(StoreNames.Tasks, list =>
         {
             var ids = new List<string>();
@@ -392,10 +375,11 @@ public sealed class TaskService
         return expired.Count;
     }
 
+    //是否已过审批有效期
     private static bool ApproveExpired(AgentTask task)
         => task.ApprovalExpiresAt != default && task.ApprovalExpiresAt < DateTime.UtcNow;
 
-    /// <summary>批准用户查看自己任务时的响应（不含管理员内部意见以外的敏感字段）。</summary>
+    //用户视图
     public object ToUserView(AgentTask task) => new
     {
         id = task.Id,
@@ -422,7 +406,7 @@ public sealed class TaskService
         approvalExpiresAt = task.ApprovalExpiresAt,
     };
 
-    /// <summary>管理端视图：额外包含解密后的用户原始输入（仅管理员可见）。</summary>
+    //管理端视图（含解密后的原始输入）
     public object ToAdminView(AgentTask task) => new
     {
         id = task.Id,

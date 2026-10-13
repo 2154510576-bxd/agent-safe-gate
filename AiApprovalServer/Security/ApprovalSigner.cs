@@ -2,23 +2,14 @@ using AiApproval.Core;
 
 namespace AiApproval.Security;
 
-/// <summary>
-/// 审批链接签名（防 IDOR 越权审批）。
-///
-/// 邮件里给出的链接形如 /admin?task=&lt;id&gt;&amp;token=&lt;sig&gt;：
-/// 令牌 = base64url(过期时间戳).base64url(HMAC-SHA256("approve|taskId|过期时间戳"))。
-/// 攻击者拿到链路后：
-///   * 改 taskId → 签名不匹配；
-///   * 改过期时间 → 签名不匹配；
-///   * 重放旧链接 → 服务端还会校验"该任务是否已被使用过令牌/已过期"。
-/// 另外令牌在库里只存 SHA-256 摘要，即使 tasks.json 泄露也无法还原可用链接。
-/// </summary>
+//审批链接签名，防 IDOR 越权审批
 public sealed class ApprovalSigner
 {
     private readonly byte[] _key;
 
     public ApprovalSigner(AppConfig cfg) => _key = cfg.DeriveMacKey("approval-link");
 
+    //生成审批令牌
     public string CreateToken(string taskId, DateTime expiresAtUtc)
     {
         var exp = new DateTimeOffset(expiresAtUtc).ToUnixTimeSeconds().ToString();
@@ -26,8 +17,10 @@ public sealed class ApprovalSigner
         return Base64Url(System.Text.Encoding.UTF8.GetBytes(exp)) + "." + Base64Url(sig);
     }
 
+    //令牌入库只存摘要
     public string HashToken(string token) => Crypto.Sha256Hex(token);
 
+    //校验令牌签名与过期
     public bool Verify(string taskId, string? token, out DateTime expiresAt, out string reason)
     {
         expiresAt = default;
@@ -53,7 +46,7 @@ public sealed class ApprovalSigner
 
         if (!long.TryParse(expRaw, out var expUnix)) { reason = "审批令牌格式错误"; return false; }
 
-        // 签名按字节恒定时间比较（把 HMAC 字节转成字符串再比较会因非 UTF-8 非法序列而误判）
+        //签名按字节恒定时间比较
         var expectedSig = System.Security.Cryptography.HMACSHA256.HashData(_key, System.Text.Encoding.UTF8.GetBytes(Payload(taskId, expRaw)));
         if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(expectedSig, providedSig))
         {

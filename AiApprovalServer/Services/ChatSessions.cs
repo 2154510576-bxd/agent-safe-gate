@@ -19,13 +19,7 @@ public sealed class ChatSession
     public string LastPlanJson { get; set; } = "";
 }
 
-/// <summary>
-/// 会话记忆（进程内）。
-///
-/// 为什么要按用户隔离：如果把所有用户的对话塞进同一个上下文，
-/// 别人的输入就会变成你的"提示词注入载体"（跨用户污染）。
-/// 因此这里以 userId 为键，并且每个会话只有 20 条上限，超限丢弃最早的对话。
-/// </summary>
+//会话记忆（按用户隔离）
 public sealed class ChatSessionStore
 {
     private const int MaxMessagesPerSession = 20;
@@ -33,6 +27,7 @@ public sealed class ChatSessionStore
 
     private readonly ConcurrentDictionary<string, ChatSession> _sessions = new(StringComparer.Ordinal);
 
+    //取或建会话
     public ChatSession GetOrCreate(string userId, string role, string? sessionId)
     {
         Evict();
@@ -45,7 +40,7 @@ public sealed class ChatSessionStore
             Role = role,
         });
 
-        // 用户被改了角色 → 上下文也必须换一套（否则旧上下文里可能残留更高权限的工具说明）
+        //角色变了则清空上下文
         if (!string.Equals(session.Role, role, StringComparison.Ordinal))
         {
             session.Role = role;
@@ -56,6 +51,7 @@ public sealed class ChatSessionStore
         return session;
     }
 
+    //追加一条消息
     public void Append(ChatSession session, string role, string content)
     {
         lock (session)
@@ -66,17 +62,20 @@ public sealed class ChatSessionStore
         }
     }
 
+    //取会话快照
     public List<ChatMessage> Snapshot(ChatSession session)
     {
         lock (session) return session.Messages.ToList();
     }
 
+    //清除会话
     public void Reset(string userId, string? sessionId)
     {
         var key = string.IsNullOrWhiteSpace(sessionId) ? userId + "|default" : userId + "|" + Sanitize(sessionId);
         _sessions.TryRemove(key, out _);
     }
 
+    //淘汰最久未用的会话
     private void Evict()
     {
         if (_sessions.Count <= MaxSessions) return;
@@ -84,6 +83,7 @@ public sealed class ChatSessionStore
             _sessions.TryRemove(key, out _);
     }
 
+    //过滤会话 id 字符
     private static string Sanitize(string value)
     {
         var cleaned = new string(value.Where(c => char.IsLetterOrDigit(c) || c is '_' or '-').ToArray());

@@ -1,31 +1,24 @@
-/*
- * frontend-check.mjs —— 前端静态安全与一致性自检（无需浏览器）。
- *
- * 用法： node frontend-check.mjs [wwwroot 路径]
- * 检查项：
- *   1) JS 里引用的 DOM id 在对应 HTML 中是否存在；
- *   2) 零 emoji；
- *   3) 无 innerHTML / outerHTML / document.write / eval（textContent 渲染的根基）；
- *   4) 无内联 style="..." 与内联 <script>（服务端 CSP 为 style-src 'self' / script-src 'self'）；
- *   5) 无外部 CDN（离线可用 + 不引入第三方供应链风险）。
- */
+//前端静态自检脚本
+//检查 DOM id 与 CSP 相关硬约束
 import fs from 'node:fs';
 import path from 'node:path';
 
 const root = process.argv[2] || '.';
+//页面与脚本配对
 const pairs = [
   ['assets/app.js', 'index.html'],
   ['assets/admin.js', 'admin.html'],
-  ['assets/biz.js', 'biz.html'],
+  ['assets/finance.js', 'finance.html'],
   ['assets/net.js', 'index.html'],
   ['assets/net.js', 'admin.html'],
-  ['assets/net.js', 'biz.html'],
+  ['assets/net.js', 'finance.html'],
 ];
 
 const emojiRx = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}\u{FE0F}\u{2190}-\u{21FF}]/gu;
 
 let problems = 0;
 
+//DOM id 一致性检查
 console.log('== DOM id 一致性 ==');
 for (const [js, html] of pairs) {
   const jsPath = path.join(root, js);
@@ -40,13 +33,14 @@ for (const [js, html] of pairs) {
   if (missing.length) problems++;
 }
 
+//静态安全检查
 console.log('== 静态安全检查 ==');
 const files = fs.readdirSync(root).filter(f => f.endsWith('.html'))
   .concat(fs.readdirSync(path.join(root, 'assets')).filter(f => /\.(js|css)$/.test(f)).map(f => 'assets/' + f));
 
 for (const rel of files) {
   const raw = fs.readFileSync(path.join(root, rel), 'utf8');
-  // 先剥掉注释再扫描：注释里提到 innerHTML（例如"绝不使用 innerHTML"）不该算问题
+  //先剥掉注释再扫描
   const text = raw
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/^\s*\/\/.*$/gm, ' ')

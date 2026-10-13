@@ -6,14 +6,7 @@ using AiApproval.Tools;
 
 namespace AiApproval.Api;
 
-/// <summary>
-/// 管理端接口（全部挂在 /api/admin/ 下，中间件已强制"必须管理员 + 非管理员访问直接记分封禁"）。
-///
-/// 审批权限始终握在"人"手里：
-///   * AI 只能生成风险摘要与建议，没有任何批准/执行接口；
-///   * 批准动作需要管理员令牌 + 请求签名，邮件链接还需要一次性签名令牌；
-///   * 每一次裁決、回滚、用户管理都写入哈希链审计。
-/// </summary>
+//管理端接口，均需管理员
 public static class AdminApi
 {
     public static void Map(WebApplication app)
@@ -132,15 +125,21 @@ public static class AdminApi
             return Api.Ok(new { message = $"已作废 {count} 个超时任务", expired = count });
         });
 
-        // ---------------------------------------------------------------- 用户管理
+        //用户管理
         group.MapGet("/users", async (HttpContext context, UserService users) =>
         {
+            var identity = Api.Identity(context);
+            if (identity is null) return Api.Error(401, "UNAUTHENTICATED", "请先登录");
+            if (!AccountPolicy.Can(identity.User.Role, Perm.AccountList))
+                return Api.Error(403, "FORBIDDEN", "当前角色无权查看账号列表");
+
             var list = await users.AllAsync();
             return Api.Ok(list.Select(u => new
             {
                 id = u.Id,
                 userName = u.UserName,
                 displayName = u.DisplayName,
+                employeeId = u.EmployeeId,
                 role = u.Role,
                 roleLabel = Roles.Label(u.Role),
                 emailMasked = u.EmailMasked,
@@ -153,10 +152,125 @@ public static class AdminApi
                 lastLoginAt = u.LastLoginAt,
                 lastLoginIp = u.LastLoginIp,
                 aiCallsToday = u.AiCallsToday,
-            }).OrderBy(u => u.userName).ToList());
+                //账号来源
+                origin = u.Origin,
+                //口令方案与迭代次数
+                passwordScheme = string.IsNullOrEmpty(u.PasswordHash)
+                    ? "none"
+                    : string.IsNullOrEmpty(u.PasswordScheme) ? "pbkdf2-sha256" : u.PasswordScheme,
+                passwordIterations = u.PasswordIterations,
+                //飞书镜像状态
+                mirrorState = u.MirrorState,
+                mirrorError = u.MirrorError,
+                mirrorAt = u.MirrorAt,
+                mirrorRoleLabel = Roles.ToFeishuLabel(u.Role),
+            }).OrderBy(u => u.employeeId).ToList());
         });
 
-        group.MapPost("/users", async (HttpContext context, UserService users, SecurityGuard guard) =>
+        group.MapGet("/users/{id}/mirror-password", async (HttpContext context, string id, UserService users, AuditLog audit) =>
+        {
+            var identity = Api.Identity(context);
+            if (identity is null) return Api.Error(401, "UNAUTHENTICATED", "请先登录");
+            if (!AccountPolicy.Can(identity.User.Role, Perm.AccountManage))
+                return Api.Error(403, "FORBIDDEN", "当前角色无权查看演示口令");
+
+            var user = await users.FindByIdAsync(Api.Clean(id, 64));
+            if (user is null) return Api.Error(404, "NOT_FOUND", "账号不存在");
+
+            var demo = users.RevealDemoPassword(user);
+            await audit.WriteAsync(identity.User.Id, identity.User.UserName, identity.User.Role, Api.Ip(context),
+                "user.mirror-password", user.UserName, "SUCCESS", "读取飞书镜像演示口令");
+
+            return Api.Ok(new
+            {
+                userName = user.UserName,
+                demoPassword = demo ?? "",
+                hint = demo is null
+                    ? "该账号没有演示口令（镜像模式为 real/none 或尚未镜像）"
+                    : "这是写进飞书用户表的演示口令，可交付协作方登录他们的前端；与用户在本系统的真实口令无关",
+            });
+        });
+
+        //飞书用户表只读预览
+        group.MapGet("/users/feishu-rows", async (HttpContext context, FeishuMirror mirror, UserService users) =>
+        {
+            var identity = Api.Identity(context);
+            if (identity is null) return Api.Error(401, "UNAUTHENTICATED", "请先登录");
+            if (!AccountPolicy.Can(identity.User.Role, Perm.AccountList))
+                return Api.Error(403, "FORBIDDEN", "当前角色无权查看账号列表");
+            if (!mirror.Enabled)
+                return Api.Ok(new { configured = false, rows = Array.Empty<object>(), message = "未配置飞书，无法读取对面的用户表" });
+
+            var rows = await mirror.ListAccountRowsAsync();
+            var local = (await users.AllAsync()).Select(u => u.UserName)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            return Api.Ok(new
+            {
+                configured = true,
+                count = rows.Count,
+                //不回口令哈希
+                rows = rows.Select(r => new
+                {
+                    recordId = r.RecordId,
+                    userName = r.UserName,
+                    displayName = r.DisplayName,
+                    employeeId = r.EmployeeId,
+                    roleLabel = r.RoleLabel,
+                    statusLabel = r.StatusLabel,
+                    hasPassword = r.HasPassword,
+                    existsLocally = local.Contains(r.UserName),
+                    createdAt = r.CreatedAt,
+                    lastLoginAt = r.LastLoginAt,
+                }).ToList(),
+            });
+        });
+
+        //同步：只补对面新增账号
+        group.MapPost("/users/sync-from-feishu", async (HttpContext context, UserService users,
+            SecurityGuard guard, AuditLog audit) =>
+        {
+            var identity = Api.Identity(context);
+            if (identity is null) return Api.Error(401, "UNAUTHENTICATED", "请先登录");
+            if (!AdminWriteAllowed(guard, identity, out var limitMessage)) return Api.Error(429, "RATE_LIMITED", limitMessage);
+
+            if (!AccountPolicy.Can(identity.User.Role, Perm.AccountCreate))
+            {
+                await audit.WriteAsync(identity.User.Id, identity.User.UserName, identity.User.Role, Api.Ip(context),
+                    "user.sync-feishu", "用户表", "DENIED", "当前角色无创建账号权限，不能执行同步").ConfigureAwait(false);
+                return Api.Error(403, "FORBIDDEN", "当前角色无权创建账号，不能执行同步");
+            }
+
+            var body = Api.ReadBody<FeishuSyncRequest>(context) ?? new FeishuSyncRequest();
+            var report = await users.ImportFromFeishuAsync(identity.User.Role, identity.User.UserName, Api.Ip(context), body.DryRun);
+
+            if (!report.Ok) return Api.Error(409, "SYNC_UNAVAILABLE", report.Message);
+
+            return Api.Ok(new
+            {
+                dryRun = report.DryRun,
+                message = (report.DryRun ? "预览结果（未写入）：" : "") + report.Message
+                          + (Api.Clean(body.Reason, 200) is { Length: > 0 } why ? $"；理由：{why}" : ""),
+                read = report.Read,
+                created = report.Created,
+                adopted = report.Adopted,
+                exists = report.Exists,
+                skipped = report.Skipped,
+                needsPasswordReset = report.NeedsPasswordReset,
+                items = report.Items.Select(i => new
+                {
+                    userName = i.UserName,
+                    displayName = i.DisplayName,
+                    employeeId = i.EmployeeId,
+                    roleLabel = i.Role,
+                    action = i.Action,
+                    detail = i.Detail,
+                    needsPasswordReset = i.NeedsPasswordReset,
+                }).ToList(),
+            });
+        });
+
+        group.MapPost("/users", async (HttpContext context, UserService users, SecurityGuard guard, AuditLog audit) =>
         {
             var identity = Api.Identity(context);
             if (identity is null) return Api.Error(401, "UNAUTHENTICATED", "请先登录");
@@ -165,22 +279,44 @@ public static class AdminApi
             var body = Api.ReadBody<UserAdminRequest>(context);
             if (body is null) return Api.Error(400, "BAD_REQUEST", "请求体格式错误");
 
-            var role = Api.Clean(body.Role, 16).ToLowerInvariant();
-            if (!Roles.IsValid(role)) return Api.Error(400, "BAD_ROLE", "角色只能是 user / staff / admin");
+            var role = (Api.Clean(body.Role, 16).ToLowerInvariant() is { Length: > 0 } r) ? r : Roles.Employee;
+            var policyError = AccountPolicy.CanCreateAccount(identity.User.Role, role);
+            if (policyError is not null)
+            {
+                await audit.WriteAsync(identity.User.Id, identity.User.UserName, identity.User.Role, Api.Ip(context),
+                    "user.create", Api.Clean(body.UserName, 32), "DENIED", policyError);
+                guard.Strike(Api.Ip(context), $"越权创建账号（{identity.User.UserName}）", weight: 2, waf: true);
+                return Api.Error(403, "FORBIDDEN", policyError);
+            }
 
             var (user, error) = await users.CreateAsync(Api.Clean(body.UserName, 32), body.Password ?? "",
                 Api.Clean(body.DisplayName, 32), role, Api.Clean(body.Email, 128), identity.User.UserName);
 
             if (user is null) return Api.Error(400, "CREATE_FAILED", error);
 
+            var demo = users.RevealDemoPassword(user);
             return Api.Ok(new
             {
-                message = $"已创建账号 {user.UserName}（{Roles.Label(user.Role)}）",
-                user = new { user.Id, user.UserName, user.DisplayName, user.Role, roleLabel = Roles.Label(user.Role) },
+                message = $"已创建账号 {user.UserName}（{Roles.Label(user.Role)}，工号 {user.EmployeeId}）",
+                user = new
+                {
+                    user.Id, user.UserName, user.DisplayName, user.EmployeeId,
+                    user.Role, roleLabel = Roles.Label(user.Role),
+                    mirrorState = user.MirrorState, mirrorError = user.MirrorError,
+                },
+                //只回演示口令，不回真实口令
+                mirrorDemoPassword = demo ?? "",
+                mirrorNote = user.MirrorState switch
+                {
+                    "synced" => "已同步到飞书用户表",
+                    "skipped" => "未配置飞书，已跳过镜像（不影响本机账号）",
+                    _ => "飞书镜像失败，已静默处理；可稍后在账号列表点「重试镜像」",
+                },
             });
         });
 
-        group.MapPost("/users/{id}/role", async (HttpContext context, string id, UserService users, SecurityGuard guard) =>
+        group.MapPost("/users/{id}/role", async (HttpContext context, string id, UserService users,
+            SecurityGuard guard, AuditLog audit) =>
         {
             var identity = Api.Identity(context);
             if (identity is null) return Api.Error(401, "UNAUTHENTICATED", "请先登录");
@@ -190,11 +326,24 @@ public static class AdminApi
             if (body is null) return Api.Error(400, "BAD_REQUEST", "请求体格式错误");
 
             var role = Api.Clean(body.Role, 16).ToLowerInvariant();
-            if (!Roles.IsValid(role)) return Api.Error(400, "BAD_ROLE", "角色非法");
+            var reason = Api.Clean(body.Reason, 200);
+            if (reason.Length < 2) return Api.Error(400, "REASON_REQUIRED", "请填写变更理由（不少于 2 个字符）");
 
             var targetUserId = Api.Clean(id, 64);
-            if (targetUserId == identity.User.Id && role != Roles.Admin)
-                return Api.Error(400, "SELF_DEMOTE", "不能降级自己的管理员角色（请让另一位管理员操作）");
+            var target = await users.FindByIdAsync(targetUserId);
+            if (target is null) return Api.Error(404, "NOT_FOUND", "账号不存在");
+
+            var superAdmins = await users.CountActiveSuperAdminsAsync();
+            var policyError = AccountPolicy.CanChangeRole(identity.User.Role, identity.User.Id, targetUserId,
+                target.Role, role, superAdmins);
+            if (policyError is not null)
+            {
+                await audit.WriteAsync(identity.User.Id, identity.User.UserName, identity.User.Role, Api.Ip(context),
+                    "user.role", target.UserName, "DENIED",
+                    $"{policyError}（目标当前角色={Roles.Label(target.Role)}，请求角色={Roles.Label(role)}）");
+                guard.Strike(Api.Ip(context), $"越权变更角色（{identity.User.UserName}）", weight: 2, waf: true);
+                return Api.Error(403, "FORBIDDEN", policyError);
+            }
 
             var ok = await users.SetRoleAsync(targetUserId, role, identity.User.UserName, Api.Ip(context));
             if (!ok) return Api.Error(404, "NOT_FOUND", "账号不存在");
@@ -202,42 +351,118 @@ public static class AdminApi
             return Api.Ok(new { message = $"角色已更新为 {Roles.Label(role)}，该账号的旧令牌已失效" });
         });
 
-        group.MapPost("/users/{id}/status", async (HttpContext context, string id, UserService users, SecurityGuard guard) =>
+        group.MapPost("/users/{id}/status", async (HttpContext context, string id, UserService users,
+            SecurityGuard guard, AuditLog audit) =>
         {
             var identity = Api.Identity(context);
             if (identity is null) return Api.Error(401, "UNAUTHENTICATED", "请先登录");
             if (!AdminWriteAllowed(guard, identity, out var limitMessage)) return Api.Error(429, "RATE_LIMITED", limitMessage);
 
-            var body = Api.ReadBody<DisableRequest>(context);
+            var body = Api.ReadBody<AccountStatusRequest>(context);
             if (body is null) return Api.Error(400, "BAD_REQUEST", "请求体格式错误");
 
             var targetUserId = Api.Clean(id, 64);
-            if (targetUserId == identity.User.Id && body.Disabled)
-                return Api.Error(400, "SELF_DISABLE", "不能禁用自己的账号");
+            var target = await users.FindByIdAsync(targetUserId);
+            if (target is null) return Api.Error(404, "NOT_FOUND", "账号不存在");
+
+            var superAdmins = await users.CountActiveSuperAdminsAsync();
+            var policyError = AccountPolicy.CanSetDisabled(identity.User.Role, identity.User.Id, targetUserId,
+                target.Role, body.Disabled, superAdmins);
+            if (policyError is not null)
+            {
+                await audit.WriteAsync(identity.User.Id, identity.User.UserName, identity.User.Role, Api.Ip(context),
+                    body.Disabled ? "user.disable" : "user.enable", target.UserName, "DENIED", policyError);
+                return Api.Error(403, "FORBIDDEN", policyError);
+            }
 
             var ok = await users.SetDisabledAsync(targetUserId, body.Disabled, identity.User.UserName, Api.Ip(context));
             if (!ok) return Api.Error(404, "NOT_FOUND", "账号不存在");
 
-            return Api.Ok(new { message = body.Disabled ? "账号已禁用（令牌立即失效）" : "账号已启用" });
+            return Api.Ok(new { message = body.Disabled ? "账号已停用（令牌立即失效）" : "账号已启用" });
         });
 
-        group.MapPost("/users/{id}/reset-password", async (HttpContext context, string id, UserService users, SecurityGuard guard) =>
+        group.MapPost("/users/{id}/reset-password", async (HttpContext context, string id, UserService users,
+            SecurityGuard guard, AuditLog audit) =>
         {
             var identity = Api.Identity(context);
             if (identity is null) return Api.Error(401, "UNAUTHENTICATED", "请先登录");
             if (!AdminWriteAllowed(guard, identity, out var limitMessage)) return Api.Error(429, "RATE_LIMITED", limitMessage);
 
-            var body = Api.ReadBody<ResetPasswordRequest>(context);
+            var body = Api.ReadBody<AdminResetPasswordRequest>(context);
             if (body is null) return Api.Error(400, "BAD_REQUEST", "请求体格式错误");
 
-            var ok = await users.ChangePasswordAsync(Api.Clean(id, 64), body.NewPassword ?? "",
+            var targetUserId = Api.Clean(id, 64);
+            var target = await users.FindByIdAsync(targetUserId);
+            if (target is null) return Api.Error(404, "NOT_FOUND", "账号不存在");
+
+            var policyError = AccountPolicy.CanResetPassword(identity.User.Role, identity.User.Id, targetUserId, target.Role);
+            if (policyError is not null)
+            {
+                await audit.WriteAsync(identity.User.Id, identity.User.UserName, identity.User.Role, Api.Ip(context),
+                    "user.password", target.UserName, "DENIED", policyError);
+                return Api.Error(403, "FORBIDDEN", policyError);
+            }
+
+            var ok = await users.ChangePasswordAsync(targetUserId, body.NewPassword ?? "",
                 identity.User.UserName, Api.Ip(context));
             if (!ok) return Api.Error(400, "RESET_FAILED", "重置失败（口令不满足强度要求或账号不存在）");
 
-            return Api.Ok(new { message = "口令已重置，该账号旧令牌全部失效" });
+            var refreshed = await users.FindByIdAsync(targetUserId);
+            return Api.Ok(new
+            {
+                message = "口令已重置，该账号旧令牌全部失效",
+                mirrorDemoPassword = refreshed is null ? "" : (users.RevealDemoPassword(refreshed) ?? ""),
+            });
         });
 
-        // ---------------------------------------------------------------- 审计
+        group.MapPost("/users/{id}/delete", async (HttpContext context, string id, UserService users,
+            SecurityGuard guard, AuditLog audit) =>
+        {
+            var identity = Api.Identity(context);
+            if (identity is null) return Api.Error(401, "UNAUTHENTICATED", "请先登录");
+            if (!AdminWriteAllowed(guard, identity, out var limitMessage)) return Api.Error(429, "RATE_LIMITED", limitMessage);
+
+            var targetUserId = Api.Clean(id, 64);
+            var target = await users.FindByIdAsync(targetUserId);
+            if (target is null) return Api.Error(404, "NOT_FOUND", "账号不存在");
+
+            var superAdmins = await users.CountActiveSuperAdminsAsync();
+            var policyError = AccountPolicy.CanDeleteAccount(identity.User.Role, identity.User.Id, targetUserId,
+                target.Role, superAdmins);
+            if (policyError is not null)
+            {
+                await audit.WriteAsync(identity.User.Id, identity.User.UserName, identity.User.Role, Api.Ip(context),
+                    "user.delete", target.UserName, "DENIED", policyError);
+                return Api.Error(403, "FORBIDDEN", policyError);
+            }
+
+            var ok = await users.DeleteAsync(targetUserId, identity.User.UserName, Api.Ip(context));
+            if (!ok) return Api.Error(404, "NOT_FOUND", "账号不存在");
+            return Api.Ok(new { message = $"账号 {target.UserName} 已删除（本机权威库；飞书镜像行需人工清理）" });
+        });
+
+        group.MapPost("/users/{id}/mirror-retry", async (HttpContext context, string id, UserService users,
+            SecurityGuard guard) =>
+        {
+            var identity = Api.Identity(context);
+            if (identity is null) return Api.Error(401, "UNAUTHENTICATED", "请先登录");
+            if (!AdminWriteAllowed(guard, identity, out var limitMessage)) return Api.Error(429, "RATE_LIMITED", limitMessage);
+            if (!AccountPolicy.Can(identity.User.Role, Perm.AccountManage))
+                return Api.Error(403, "FORBIDDEN", "当前角色无权重试镜像");
+
+            var result = await users.RetryMirrorAsync(Api.Clean(id, 64), Api.Ip(context));
+            return Api.Ok(new
+            {
+                ok = result.Ok,
+                skipped = result.Skipped,
+                error = result.Error,
+                message = result.Ok
+                    ? (result.Skipped ? "已跳过（飞书未配置）" : "镜像已同步")
+                    : "镜像仍然失败（已静默处理，不影响本机账号）",
+            });
+        });
+
+        //审计
         group.MapGet("/audit", async (HttpContext context, AuditLog audit, string? action, string? actor, int? limit, int? offset) =>
         {
             var list = await audit.ReadAsync(limit ?? 200, offset ?? 0, Api.Clean(action, 40), Api.Clean(actor, 64));
@@ -263,7 +488,7 @@ public static class AdminApi
             return Api.Ok(new { ok, checkedCount = count, brokenAt, message });
         });
 
-        // ---------------------------------------------------------------- 版本与回退
+        //版本与回退
         group.MapGet("/versions", async (HttpContext context, VersionStore versions, string? userId, int? limit) =>
         {
             var list = await versions.ListAsync(Api.Clean(userId, 64), limit ?? 100);
@@ -287,7 +512,7 @@ public static class AdminApi
 
             var rollbackTaskId = "t_" + Crypto.RandomHex(8);
 
-            // 回退本身也建一条任务：审计闭环里"谁在什么时候把什么退回了什么状态"必须可查
+            //回退本身也建任务，留审计
             await store.MutateAsync<AgentTask, bool>(StoreNames.Tasks, list =>
             {
                 list.Add(new AgentTask
@@ -356,7 +581,7 @@ public static class AdminApi
             });
         });
 
-        // ---------------------------------------------------------------- 数据与出站箱
+        //数据与出站箱
         group.MapGet("/datasets/{name}", async (HttpContext context, DatasetStore datasets, string name, int? limit) =>
         {
             if (!DatasetCatalog.IsKnown(name)) return Api.Error(404, "NOT_FOUND", "未知数据集");
@@ -416,7 +641,7 @@ public static class AdminApi
             return Api.Ok(new { message = "已执行补偿事务：通知标记为已撤回" });
         });
 
-        // ---------------------------------------------------------------- 安全态势
+        //安全态势
         group.MapGet("/security", (HttpContext context, SecurityGuard guard, AppConfig cfg) => Api.Ok(new
         {
             snapshot = guard.Snapshot(),

@@ -3,39 +3,20 @@ using AiApproval.Services;
 
 namespace AiApproval.Tools;
 
+//规则校验结果
 public sealed class RuleEvaluation
 {
     public RuleOutcome Outcome { get; init; } = new();
-    /// <summary>人类可读的动作摘要（给审批人看，例如：覆盖文件 draft/客户名单.txt）</summary>
+    //动作摘要（给审批人看）
     public string ActionSummary { get; init; } = "";
 }
 
-/// <summary>
-/// 规则引擎（硬防线）：100% 确定性的代码校验，不依赖任何模型判断。
-///
-/// 校验层次：
-///   1) 工具是否存在于目录白名单；
-///   2) 当前角色是否拥有该工具所需权限（最小权限）；
-///   3) 参数白名单 + 必填 + 类型/格式/长度（未知参数一律拒绝）；
-///   4) 业务级硬规则：路径白名单、系统保护路径、收件人白名单、数据集/字段白名单；
-///   5) 风险升级：覆盖已有文件、共享区写入、疑似注入 → 强制人工审批（只升不降）。
-///
-/// 只要这一层拒绝，无论 AI 说什么都不会执行——这就是"不信任上游 AI 输出"的落点。
-/// </summary>
+//规则引擎（硬防线）
 public sealed class RuleEngine
 {
     private static readonly string[] ProtectedPathMarkers =
     {
         ".env", ".ssh", ".git", "web.config", "appsettings", "secrets.json", "id_rsa", ".htaccess",
-    };
-
-    /// <summary>甲方可自行修改的档案字段（等级/状态/备注属于乙方运营口径，甲方无权改）</summary>
-    private static readonly string[] ClientSelfFields = { "name", "contact", "phone", "industry", "requirement" };
-
-    /// <summary>需求单可修改字段（编号、甲方编号、提交账号、创建时间都是只读）</summary>
-    private static readonly string[] RequirementWritableFields =
-    {
-        "title", "detail", "budget", "expect_date", "status", "owner",
     };
 
     private readonly PathGuard _paths;
@@ -51,6 +32,7 @@ public sealed class RuleEngine
         _cfg = cfg;
     }
 
+    //做主校验
     public async Task<RuleEvaluation> EvaluateAsync(string role, string userId, string toolName,
         Dictionary<string, string> rawArgs, bool injectionSuspected)
     {
@@ -61,14 +43,15 @@ public sealed class RuleEngine
         if (tool is null)
             return Deny($"工具 {Sanitize(toolName)} 不在允许的目录中");
 
-        if (tool.AdminOnly && role != Roles.Admin)
+        //管理端工具按角色组判
+        if (tool.AdminOnly && !Roles.IsAdminSide(role))
             return Deny("该工具仅管理员可用");
 
         var missing = tool.Permissions.Where(p => !ToolCatalog.HasPermission(role, p)).ToList();
         if (missing.Count > 0)
             return Deny($"当前角色（{Roles.Label(role)}）缺少权限：{string.Join("、", missing.Select(Permissions.Label))}");
 
-        // 未知参数直接拒绝：防"走私参数"
+        //未知参数一律拒绝
         var unknown = args.Keys.Where(k => !tool.AllowedParamNames.Contains(k, StringComparer.OrdinalIgnoreCase)).ToList();
         if (unknown.Count > 0)
             return Deny($"包含未定义的参数：{string.Join("、", unknown.Select(Sanitize))}");
@@ -117,7 +100,7 @@ public sealed class RuleEngine
                 if (string.IsNullOrEmpty(check.Relative))
                     return Deny("必须指定文件名");
 
-                // 真二进制（含 NUL 字节）：不是策略拒绝，而是**文本工具的能力边界** → 给出可执行的替代方案
+                //真二进制只能拒绝
                 if (ContentRiskScanner.LooksLikeRealBinary(content))
                     return Deny("检测到二进制内容（含 NUL 字节），本工具只能写文本。"
                                 + "如果确实要落地二进制：请改为写入 base64 文本文件（例如 app.bin.b64）并在说明里标注来源，"
@@ -129,7 +112,7 @@ public sealed class RuleEngine
 
                 var exists = File.Exists(check.FullPath);
 
-                // 说"新建"但文件已存在：把选择权交回去（追加/覆盖/改名），而不是一刀切拒绝
+                //已存在就让用户选
                 if (mode == "create" && exists)
                 {
                     return Ask($"{check.Relative} 已经存在，请确认你要怎么做",
@@ -141,7 +124,7 @@ public sealed class RuleEngine
                         });
                 }
 
-                // ---------- 风险分级：可执行性（后缀 ∪ 内容识别）+ 内容特征 + 区域 ----------
+                //风险分级
                 var executable = ContentRiskScanner.DetectExecutable(check.Relative, content);
                 var contentRisk = ContentRiskScanner.Scan(content);
                 var risks = executable.Evidences.Concat(contentRisk.Hits).Distinct().ToList();
@@ -149,7 +132,7 @@ public sealed class RuleEngine
 
                 if (executable.IsExecutable)
                 {
-                    // 可执行/脚本（无论靠后缀还是靠内容识别出来的）→ 一律人工审批，绝不自动执行
+                    //可执行一律转审批
                     outcome.RequiresApproval = true;
                     outcome.RiskLevel = Risk.Max(outcome.RiskLevel, Risk.High);
                     outcome.Reasons.Add($"判定为可执行/脚本内容（判定通道：{executable.Channel}）：" + executable.Summary);
@@ -164,7 +147,7 @@ public sealed class RuleEngine
                     outcome.Translations.Add("片段风险扫描：" + contentRisk.Summary);
                 }
 
-                // 覆盖：私人工作区的普通文本允许（有快照可回退）；共享区与可执行/风险内容必须人工确认
+                //覆盖的分级判断
                 if (exists && mode == "overwrite" && (check.Scope == "share" || executable.IsExecutable || contentRisk.HasRisk))
                 {
                     outcome.RequiresApproval = true;
@@ -179,7 +162,7 @@ public sealed class RuleEngine
                     outcome.Reasons.Add("写入共享工作区会影响其他成员，需要人工确认");
                 }
 
-                // ---------- 私人工作区的普通文本文件：增/改/覆写都允许免人工审批（快照 + 审计照样留） ----------
+                //私人区普通文本可免审批
                 var isPrivate = check.Scope == "private";
                 var isPlainText = !executable.IsExecutable && !contentRisk.HasRisk;
                 var smallEnough = content.Length <= 20000;
@@ -220,7 +203,7 @@ public sealed class RuleEngine
                 var oldExt = Path.GetExtension(check.Relative).TrimStart('.').ToLowerInvariant();
                 var newExt = Path.GetExtension(newName).TrimStart('.').ToLowerInvariant();
 
-                // 改名（含改后缀）始终允许；但"变成可执行/脚本后缀"必须人工审批（后缀判断 ∪ 原内容识别）
+                //改成可执行后缀要审批
                 var newNameVerdict = ContentRiskScanner.DetectExecutable(newName, null);
                 var oldContentVerdict = ContentRiskScanner.DetectExecutable(check.Relative, null);
                 var extChanged = !string.Equals(oldExt, newExt, StringComparison.OrdinalIgnoreCase);
@@ -247,7 +230,7 @@ public sealed class RuleEngine
                     outcome.Reasons.Add("共享工作区改名会影响其他成员");
                 }
 
-                // 私人工作区、后缀不变、名字无风险 → 允许免人工审批
+                //同后缀改名可免审批
                 if (check.Scope == "private" && !extChanged && !newNameVerdict.IsExecutable && !injectionSuspected)
                 {
                     outcome.SandboxAutoAllowed = true;
@@ -324,7 +307,7 @@ public sealed class RuleEngine
                 normalized["task_id"] = taskId;
                 normalized["reason"] = (args.GetValueOrDefault("reason") ?? "").Trim();
 
-                // 撤回只是取消排队，不产生任何副作用 → 免人工审批（提升体验，也避免"提交错了却撤不回来"）
+                //撤回无副作用可免审批
                 outcome.SandboxAutoAllowed = !injectionSuspected;
                 outcome.Translations.Add("撤回申请无副作用（只取消排队，不执行任何动作）→ 允许免人工审批");
 
@@ -359,7 +342,7 @@ public sealed class RuleEngine
                     outcome.Translations.Add("可执行性判定：" + verdict.Summary);
                 }
 
-                // 私人工作区的普通文件：允许 AI 直接删除（删除前照例存快照，可一键回退）
+                //私人区普通文件可直删
                 if (check.Scope == "private" && !verdict.IsExecutable && !injectionSuspected)
                 {
                     outcome.SandboxAutoAllowed = true;
@@ -478,268 +461,7 @@ public sealed class RuleEngine
                 break;
             }
 
-            // ------------------------------------------------ 甲方 / 乙方 对接业务
-            case "my_client":
-            {
-                var mine = await FindOwnClientAsync(userId).ConfigureAwait(false);
-                if (mine is null)
-                    return Deny("你的账号尚未建立甲方档案，请先提交建档申请（公司名称/联系人/联系电话）");
-
-                normalized["client_id"] = Get(mine, "id");
-                summary = $"查看我司档案：{Get(mine, "name")}（{Get(mine, "id")}）";
-                break;
-            }
-
-            case "create_client_profile":
-            {
-                if (role != Roles.User)
-                    return Deny("建档仅限甲方账号使用；员工请用“查询客户档案 / 修改客户档案”处理客户资料");
-
-                var existing = await FindOwnClientAsync(userId).ConfigureAwait(false);
-                if (existing is not null)
-                    return Deny($"你的账号已绑定档案 {Get(existing, "id")}，如需变更请使用“修改客户档案”");
-
-                var schema = DatasetCatalog.All["customers"];
-                var profile = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var fieldName in new[] { "name", "contact", "phone", "industry", "requirement" })
-                {
-                    var raw = (args.GetValueOrDefault(fieldName) ?? "").Trim();
-                    if (raw.Length == 0)
-                    {
-                        if (fieldName == "industry") { profile[fieldName] = "其它"; continue; }
-                        if (fieldName is "name" or "contact" or "phone") return Deny($"{schema.Field(fieldName)!.Label}不能为空");
-                        profile[fieldName] = "";
-                        continue;
-                    }
-
-                    var error = _datasets.ValidateValue(schema, fieldName, raw, out var normalizedValue);
-                    if (error is not null) return Deny(error);
-                    profile[fieldName] = normalizedValue;
-                }
-
-                foreach (var kv in profile) normalized[kv.Key] = kv.Value;
-                summary = $"提交建档申请：{profile["name"]}（联系人 {profile["contact"]}，{profile["phone"]}）";
-                break;
-            }
-
-            case "update_client_profile":
-            {
-                var field = (args.GetValueOrDefault("field") ?? "").Trim();
-                var value = (args.GetValueOrDefault("value") ?? "").Trim();
-                if (field.Length == 0 || value.Length == 0) return Deny("字段名与新值都不能为空");
-
-                // 字段名也做一次"口语 → 字段名"的收敛：说"等级/名字/电话"也能用
-                field = MapFieldName("customers", field);
-
-                string clientId;
-                if (role == Roles.User)
-                {
-                    var mine = await FindOwnClientAsync(userId).ConfigureAwait(false);
-                    if (mine is null) return Deny("你的账号尚未建立甲方档案，请先提交建档申请");
-
-                    var requested = (args.GetValueOrDefault("client_id") ?? args.GetValueOrDefault("client") ?? "").Trim();
-                    if (requested.Length > 0 && !requested.Equals(Get(mine, "id"), StringComparison.OrdinalIgnoreCase)
-                        && !Get(mine, "name").Equals(requested, StringComparison.OrdinalIgnoreCase))
-                        return Deny("你只能修改本公司的档案，不能修改其他客户的档案");
-
-                    clientId = Get(mine, "id");
-                    if (!ClientSelfFields.Contains(field, StringComparer.OrdinalIgnoreCase))
-                        return Deny($"甲方只能修改：公司名称、联系人、联系电话、所属行业、需求摘要（{Sanitize(field)} 属于乙方维护字段）");
-                }
-                else
-                {
-                    var resolved = await ResolveClientAsync(args.GetValueOrDefault("client_id"), args.GetValueOrDefault("client")).ConfigureAwait(false);
-                    if (resolved.Candidates.Count > 0)
-                        return Ask($"「{resolved.Keyword}」匹配到多个客户，请指明要改哪一个", DescribeClients(resolved.Candidates));
-                    if (resolved.Error is not null) return Deny(resolved.Error);
-                    if (resolved.Row is null) return Deny("请指明要修改的客户（传 client=公司名关键字即可，例如「示例物流」）");
-
-                    clientId = Get(resolved.Row, "id");
-                    if (resolved.Translation.Length > 0) outcome.Translations.Add(resolved.Translation);
-                    if (field.Equals("owner", StringComparison.OrdinalIgnoreCase))
-                        return Deny("负责人变更请使用“指派客户负责人”，以便留下独立的审批与审计记录");
-                }
-
-                var schema = DatasetCatalog.All["customers"];
-                if (schema.Field(field) is null)
-                    return Deny($"客户档案不存在字段：{Sanitize(field)}（可用字段：{string.Join(" / ", schema.Fields.Where(f => f.Writable).Select(f => f.Name))}）");
-
-                var valueError = _datasets.ValidateValue(schema, field, value, out var normalizedValue);
-                if (valueError is not null) return Deny(valueError);
-
-                var target = await _datasets.FindRowAsync("customers", clientId).ConfigureAwait(false);
-                if (target is null) return Deny($"客户档案不存在：{clientId}");
-
-                var oldValue = Get(target, field);
-                if (oldValue.Equals(normalizedValue, StringComparison.Ordinal))
-                    return Deny($"{schema.Field(field)!.Label}的新值与当前值相同（{oldValue}），无需提交审批");
-
-                if (!oldValue.Equals(value, StringComparison.Ordinal) && !normalizedValue.Equals(value, StringComparison.OrdinalIgnoreCase))
-                    outcome.Translations.Add($"{schema.Field(field)!.Label}：「{value}」→「{normalizedValue}」");
-
-                normalized["client_id"] = clientId;
-                normalized["field"] = field;
-                normalized["value"] = normalizedValue;
-                normalized["old_value"] = oldValue;
-                summary = $"修改客户档案 {clientId}（{Get(target, "name")}）的 {schema.Field(field)!.Label}：{oldValue} → {normalizedValue}";
-                break;
-            }
-
-            case "assign_client_owner":
-            {
-                var owner = (args.GetValueOrDefault("owner") ?? "").Trim();
-                if (owner.Length is 0 or > 32) return Deny("负责员工用户名长度需在 1-32 字符之间");
-
-                var resolved = await ResolveClientAsync(args.GetValueOrDefault("client_id"), args.GetValueOrDefault("client")).ConfigureAwait(false);
-                if (resolved.Candidates.Count > 0)
-                    return Ask($"「{resolved.Keyword}」匹配到多个客户，请指明要给哪一个指派负责人", DescribeClients(resolved.Candidates));
-                if (resolved.Error is not null) return Deny(resolved.Error);
-                if (resolved.Row is null) return Deny("请指明客户（传 client=公司名关键字即可）");
-
-                var clientId = Get(resolved.Row, "id");
-                if (resolved.Translation.Length > 0) outcome.Translations.Add(resolved.Translation);
-
-                var current = Get(resolved.Row, "owner");
-                if (current.Equals(owner, StringComparison.OrdinalIgnoreCase))
-                    return Deny($"该客户当前负责人已是 {owner}");
-
-                normalized["client_id"] = clientId;
-                normalized["owner"] = owner;
-                normalized["old_value"] = current;
-                summary = $"指派客户 {clientId}（{Get(resolved.Row, "name")}）的负责人：{(current.Length == 0 ? "（未指派）" : current)} → {owner}";
-                break;
-            }
-
-            case "find_client":
-            {
-                var keyword = (args.GetValueOrDefault("keyword") ?? "").Trim();
-                if (keyword.Length is 0 or > 40) return Deny("关键字长度需在 1-40 字符之间");
-
-                var limit = 10;
-                if (args.TryGetValue("limit", out var limitRaw) && !string.IsNullOrWhiteSpace(limitRaw)
-                    && int.TryParse(limitRaw, out var parsed)) limit = Math.Clamp(parsed, 1, 50);
-
-                normalized["keyword"] = keyword;
-                normalized["limit"] = limit.ToString();
-                summary = $"按关键字查找客户：{Sanitize(keyword)}";
-                break;
-            }
-
-            case "get_client_detail":
-            {
-                var resolved = await ResolveClientAsync(args.GetValueOrDefault("client_id"), args.GetValueOrDefault("client")).ConfigureAwait(false);
-                if (resolved.Candidates.Count > 0)
-                    return Ask($"「{resolved.Keyword}」匹配到多个客户，请指明看哪一个", DescribeClients(resolved.Candidates));
-                if (resolved.Error is not null) return Deny(resolved.Error);
-                if (resolved.Row is null) return Deny("请指明客户（传 client=公司名关键字即可）");
-
-                normalized["client_id"] = Get(resolved.Row, "id");
-                if (resolved.Translation.Length > 0) outcome.Translations.Add(resolved.Translation);
-                summary = $"查看客户详情：{Get(resolved.Row, "name")}（{Get(resolved.Row, "id")}）";
-                break;
-            }
-
-            case "submit_requirement":
-            {
-                string customerId;
-                if (role == Roles.User)
-                {
-                    var mine = await FindOwnClientAsync(userId).ConfigureAwait(false);
-                    if (mine is null) return Deny("你的账号尚未建立甲方档案，请先提交建档申请，再提交需求");
-
-                    var requested = (args.GetValueOrDefault("customer_id") ?? args.GetValueOrDefault("customer") ?? "").Trim();
-                    if (requested.Length > 0 && !requested.Equals(Get(mine, "id"), StringComparison.OrdinalIgnoreCase)
-                        && !Get(mine, "name").Equals(requested, StringComparison.OrdinalIgnoreCase))
-                        return Deny("你只能为自己的公司提交需求单");
-
-                    customerId = Get(mine, "id");
-                }
-                else
-                {
-                    var resolved = await ResolveClientAsync(args.GetValueOrDefault("customer_id"), args.GetValueOrDefault("customer")).ConfigureAwait(false);
-                    if (resolved.Candidates.Count > 0)
-                        return Ask($"「{resolved.Keyword}」匹配到多个客户，请指明给哪一家提交需求", DescribeClients(resolved.Candidates));
-                    if (resolved.Error is not null) return Deny(resolved.Error);
-                    if (resolved.Row is null) return Deny("请指明要代哪家客户提交需求（传 customer=公司名关键字即可）——或让客户自己在业务对接台提交");
-
-                    customerId = Get(resolved.Row, "id");
-                    if (resolved.Translation.Length > 0) outcome.Translations.Add(resolved.Translation);
-                }
-
-                var title = (args.GetValueOrDefault("title") ?? "").Trim();
-                var detail = (args.GetValueOrDefault("detail") ?? "").Trim();
-                if (title.Length == 0) return Deny("需求标题不能为空");
-                if (detail.Length == 0) return Deny("需求描述不能为空");
-
-                var schema = DatasetCatalog.All["requirements"];
-                var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var fieldName in new[] { "title", "detail", "budget", "expect_date" })
-                {
-                    var raw = args.GetValueOrDefault(fieldName) ?? "";
-                    if (string.IsNullOrWhiteSpace(raw)) { if (fieldName is "title" or "detail") return Deny($"{schema.Field(fieldName)!.Label}不能为空"); values[fieldName] = ""; continue; }
-
-                    var error = _datasets.ValidateValue(schema, fieldName, raw.Trim(), out var normalizedValue);
-                    if (error is not null) return Deny(error);
-                    values[fieldName] = normalizedValue;
-                }
-
-                normalized["customer_id"] = customerId;
-                foreach (var kv in values) normalized[kv.Key] = kv.Value;
-                summary = $"提交需求单：{values["title"]}（甲方 {customerId}"
-                          + (values["budget"].Length > 0 ? $"，预算 {values["budget"]} 元" : "")
-                          + (values["expect_date"].Length > 0 ? $"，期望交付 {values["expect_date"]}" : "") + "）";
-                break;
-            }
-
-            case "my_requirements":
-            {
-                var mine = await FindOwnClientAsync(userId).ConfigureAwait(false);
-                if (mine is null)
-                    return Deny("你的账号尚未建立甲方档案，请先提交建档申请");
-
-                normalized["client_id"] = Get(mine, "id");
-                summary = $"查看我司需求单：{Get(mine, "name")}（{Get(mine, "id")}）";
-                break;
-            }
-
-            case "update_requirement":
-            {
-                var field = MapFieldName("requirements", (args.GetValueOrDefault("field") ?? "").Trim());
-                var value = (args.GetValueOrDefault("value") ?? "").Trim();
-                if (field.Length == 0 || value.Length == 0) return Deny("字段名与新值都不能为空");
-
-                if (!RequirementWritableFields.Contains(field, StringComparer.OrdinalIgnoreCase))
-                    return Deny($"需求单可修改字段：{string.Join(" / ", RequirementWritableFields)}");
-
-                var resolved = await ResolveRequirementAsync(args.GetValueOrDefault("id"), args.GetValueOrDefault("requirement")).ConfigureAwait(false);
-                if (resolved.Candidates.Count > 0)
-                    return Ask($"「{resolved.Keyword}」匹配到多个需求单，请指明要改哪一个", DescribeRequirements(resolved.Candidates));
-                if (resolved.Error is not null) return Deny(resolved.Error);
-                if (resolved.Row is null) return Deny("请指明需求单（传 requirement=标题关键字即可）");
-
-                if (resolved.Translation.Length > 0) outcome.Translations.Add(resolved.Translation);
-                var id = Get(resolved.Row, "id");
-
-                var schema = DatasetCatalog.All["requirements"];
-                var valueError = _datasets.ValidateValue(schema, field, value, out var normalizedValue);
-                if (valueError is not null) return Deny(valueError);
-
-                var oldValue = Get(resolved.Row, field);
-                if (oldValue.Equals(normalizedValue, StringComparison.Ordinal))
-                    return Deny($"{schema.Field(field)!.Label}的新值与当前值相同（{oldValue}），无需提交审批");
-
-                if (!oldValue.Equals(value, StringComparison.Ordinal) && !normalizedValue.Equals(value, StringComparison.OrdinalIgnoreCase))
-                    outcome.Translations.Add($"{schema.Field(field)!.Label}：「{value}」→「{normalizedValue}」");
-
-                normalized["id"] = id;
-                normalized["field"] = field;
-                normalized["value"] = normalizedValue;
-                normalized["old_value"] = oldValue;
-                summary = $"维护需求单 {id}（{Get(resolved.Row, "title")}）的 {schema.Field(field)!.Label}：{oldValue} → {normalizedValue}";
-                break;
-            }
-
-            // ------------------------------------------------ 检索与统计
+            //检索与统计
             case "search_files":
             {
                 var scope = (args.GetValueOrDefault("scope") ?? "private").Trim().ToLowerInvariant();
@@ -811,20 +533,13 @@ public sealed class RuleEngine
             {
                 var dataset = (args.GetValueOrDefault("dataset") ?? "").Trim();
                 if (dataset.Length > 0 && !DatasetCatalog.IsKnown(dataset))
-                    return Deny("dataset 只能是 customers / requirements / orders / contracts（或留空统计全部）");
+                    return Deny("dataset 不是已知的数据集（或留空统计全部）");
 
-                // 数据范围按角色收敛：甲方只统计本公司，员工/管理员统计全量
+                //统计对所有角色开放
                 normalized["dataset"] = dataset.ToLowerInvariant();
-                normalized["scope"] = role == Roles.User ? "mine" : "all";
+                normalized["scope"] = "all";
 
-                if (role == Roles.User)
-                {
-                    var mine = await FindOwnClientAsync(userId).ConfigureAwait(false);
-                    normalized["client_id"] = mine is null ? "" : Get(mine, "id");
-                }
-
-                summary = "统计业务数据条数" + (dataset.Length > 0 ? $"（{dataset}）" : "（全部）")
-                          + (role == Roles.User ? "，范围：本公司" : "，范围：全部客户");
+                summary = "统计业务数据条数" + (dataset.Length > 0 ? $"（{dataset}）" : "（全部）");
                 break;
             }
 
@@ -853,46 +568,6 @@ public sealed class RuleEngine
             case "my_tasks":
                 summary = "查看本人任务列表";
                 break;
-
-            case "search_clients":
-            {
-                var limit = 20;
-                if (args.TryGetValue("limit", out var limitRaw) && !string.IsNullOrWhiteSpace(limitRaw))
-                {
-                    if (!int.TryParse(limitRaw, out limit) || limit < 1) return Deny("limit 必须是正整数");
-                    limit = Math.Min(limit, 50);
-                }
-
-                var schema = DatasetCatalog.All["customers"];
-                if (args.TryGetValue("field", out var fieldRaw) && !string.IsNullOrWhiteSpace(fieldRaw))
-                {
-                    var field = MapFieldName("customers", fieldRaw.Trim());
-                    if (schema.Field(field) is null) return Deny($"客户档案不存在字段：{Sanitize(fieldRaw)}");
-                    normalized["field"] = field;
-
-                    foreach (var key in new[] { "op", "value" })
-                        if (args.TryGetValue(key, out var v) && !string.IsNullOrWhiteSpace(v)) normalized[key] = v.Trim();
-
-                    // 过滤值也做口语映射（"查重要的客户"→ level=铂金）
-                    if (normalized.TryGetValue("value", out var filterValue) &&
-                        schema.Field(field) is { Type: "enum", EnumValues: { } options })
-                    {
-                        var mapped = options.FirstOrDefault(o => o.Equals(filterValue, StringComparison.OrdinalIgnoreCase))
-                                     ?? DatasetStore.MapEnumValue(schema.Field(field)!.Label, filterValue, options);
-                        if (mapped is not null && !mapped.Equals(filterValue, StringComparison.Ordinal))
-                        {
-                            normalized["value"] = mapped;
-                            outcome.Translations.Add($"{schema.Field(field)!.Label}筛选：「{filterValue}」→「{mapped}」");
-                        }
-                    }
-                }
-
-                normalized["limit"] = limit.ToString();
-                summary = "查询客户档案" + (normalized.TryGetValue("field", out var f)
-                    ? $"（{f} {normalized.GetValueOrDefault("op", "eq")} {normalized.GetValueOrDefault("value", "")}）"
-                    : "（全部）");
-                break;
-            }
 
             case "my_profile":
                 summary = "查看本人权限";
@@ -972,7 +647,7 @@ public sealed class RuleEngine
                 return Deny("该工具尚未接入规则引擎");
         }
 
-        // 疑似提示词注入：不直接拒绝（避免误杀正常讨论），但强制转人工，绝不允许自动执行
+        //疑似注入强制转人工
         if (injectionSuspected && tool.StateChanging)
         {
             outcome.RequiresApproval = true;
@@ -990,6 +665,7 @@ public sealed class RuleEngine
         return new RuleEvaluation { Outcome = outcome, ActionSummary = summary };
     }
 
+    //校验文件访问
     private Task<(string? Error, string FullPath, string Relative, string Scope, bool IsDirectory)> CheckFileAccessAsync(
         string userId, string role, Dictionary<string, string> args, bool requireShareWrite)
     {
@@ -1018,6 +694,7 @@ public sealed class RuleEngine
         return Task.FromResult<(string?, string, string, string, bool)>((null, resolved.FullPath, resolved.Relative, scope, isDir));
     }
 
+    //返回拒绝
     private static RuleEvaluation Deny(string reason) => new()
     {
         Outcome = new RuleOutcome
@@ -1029,6 +706,7 @@ public sealed class RuleEngine
         ActionSummary = "已被规则引擎拒绝",
     };
 
+    //规范化参数
     private static Dictionary<string, string> Normalize(Dictionary<string, string>? raw)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1044,9 +722,11 @@ public sealed class RuleEngine
         return result;
     }
 
+    //拼区域和路径
     private static string Describe(string scope, string relative)
         => (scope == "share" ? "共享区/" : "个人区/") + (string.IsNullOrEmpty(relative) ? "" : relative);
 
+    //写入模式中文名
     private static string ModeLabel(string mode) => mode switch
     {
         "create" => "新建",
@@ -1055,7 +735,7 @@ public sealed class RuleEngine
         _ => "写入",
     };
 
-    /// <summary>日志与错误信息里只保留可打印字符，避免把控制字符写进审计文件。</summary>
+    //只留可打印字符
     private static string Sanitize(string? value)
     {
         if (string.IsNullOrEmpty(value)) return "";
@@ -1063,11 +743,7 @@ public sealed class RuleEngine
         return cleaned.Length <= 60 ? cleaned : cleaned[..60] + "...";
     }
 
-    /// <summary>找出与当前账号绑定的甲方档案（account_user_id 由服务端维护，客户端改不了）。</summary>
-    private async Task<Dictionary<string, string>?> FindOwnClientAsync(string userId)
-        => await _datasets.FindByFieldAsync("customers", "account_user_id", userId).ConfigureAwait(false);
-
-    /// <summary>"需要澄清"：不落任务、不执行，把候选交回上游（AI 可据此再问用户或换一个更精确的关键字）。</summary>
+    //需要澄清：交回候选
     private static RuleEvaluation Ask(string question, List<string> candidates) => new()
     {
         Outcome = new RuleOutcome
@@ -1080,6 +756,7 @@ public sealed class RuleEngine
         ActionSummary = "信息不足，需要澄清：" + question,
     };
 
+    //候选解析结果
     private sealed class ResolveResult
     {
         public Dictionary<string, string>? Row { get; init; }
@@ -1089,72 +766,15 @@ public sealed class RuleEngine
         public string Keyword { get; init; } = "";
     }
 
-    /// <summary>
-    /// 定位客户：优先用编号；否则用**公司名/联系人关键字**模糊匹配。
-    /// 命中多条不报错，而是回"候选"，让 AI（或用户）确认——这就是"不用记编号"的落点。
-    /// </summary>
-    private async Task<ResolveResult> ResolveClientAsync(string? clientId, string? keyword)
-    {
-        if (!string.IsNullOrWhiteSpace(clientId))
-        {
-            var row = await _datasets.FindRowAsync("customers", clientId.Trim()).ConfigureAwait(false);
-            return row is null
-                ? new ResolveResult { Error = $"客户档案不存在：{Sanitize(clientId)}" }
-                : new ResolveResult { Row = row };
-        }
-
-        var k = (keyword ?? "").Trim();
-        if (k.Length == 0) return new ResolveResult();
-
-        var hits = await _datasets.FindClientsByKeywordAsync(k).ConfigureAwait(false);
-        if (hits.Count == 0) return new ResolveResult { Error = $"没有找到公司名/联系人包含「{Sanitize(k)}」的客户", Keyword = k };
-        if (hits.Count > 1) return new ResolveResult { Candidates = hits, Keyword = k };
-
-        return new ResolveResult
-        {
-            Row = hits[0],
-            Keyword = k,
-            Translation = $"名称「{k}」→ 客户 {Get(hits[0], "id")}（{Get(hits[0], "name")}）",
-        };
-    }
-
-    /// <summary>定位需求单：优先编号，否则用标题关键字模糊匹配（同样支持"多候选 → 澄清"）。</summary>
-    private async Task<ResolveResult> ResolveRequirementAsync(string? id, string? keyword)
-    {
-        if (!string.IsNullOrWhiteSpace(id))
-        {
-            var row = await _datasets.FindRowAsync("requirements", id.Trim()).ConfigureAwait(false);
-            return row is null
-                ? new ResolveResult { Error = $"需求单不存在：{Sanitize(id)}" }
-                : new ResolveResult { Row = row };
-        }
-
-        var k = (keyword ?? "").Trim();
-        if (k.Length == 0) return new ResolveResult { Error = "请提供需求标题关键字（例如「设备数据看板」）或需求编号" };
-
-        var hits = await _datasets.FindRequirementsByKeywordAsync(k).ConfigureAwait(false);
-        if (hits.Count == 0) return new ResolveResult { Error = $"没有找到标题/描述包含「{Sanitize(k)}」的需求单", Keyword = k };
-        if (hits.Count > 1) return new ResolveResult { Candidates = hits, Keyword = k };
-
-        return new ResolveResult
-        {
-            Row = hits[0],
-            Keyword = k,
-            Translation = $"标题「{k}」→ 需求单 {Get(hits[0], "id")}（{Get(hits[0], "title")}）",
-        };
-    }
-
-    /// <summary>把客户候选渲染成给 AI/用户看的短列表（形如 C1004 示例物流（潜在））。</summary>
+    //渲染客户候选
     private static List<string> DescribeClients(IEnumerable<Dictionary<string, string>> rows)
         => rows.Select(r => $"{Get(r, "id")} {Get(r, "name")}（{Get(r, "status")}，负责人 {(Get(r, "owner").Length == 0 ? "未指派" : Get(r, "owner"))}）").ToList();
 
+    //渲染需求候选
     private static List<string> DescribeRequirements(IEnumerable<Dictionary<string, string>> rows)
         => rows.Select(r => $"{Get(r, "id")} {Get(r, "title")}（{Get(r, "status")}，甲方 {Get(r, "customer_id")}）").ToList();
 
-    /// <summary>
-    /// 字段名口语收敛：用户/AI 说"等级""电话""负责人""预算"也能落到 Schema 的英文字段名上。
-    /// 命中不了就原样返回（由后续白名单校验给出"可用字段"错误）。
-    /// </summary>
+    //字段名口语收敛
     private static string MapFieldName(string dataset, string field)
     {
         if (!DatasetCatalog.IsKnown(dataset)) return field;
@@ -1198,6 +818,7 @@ public sealed class RuleEngine
         return name;
     }
 
+    //取字段值
     private static string Get(Dictionary<string, string> row, string field)
     {
         var kv = row.FirstOrDefault(x => string.Equals(x.Key, field, StringComparison.OrdinalIgnoreCase));

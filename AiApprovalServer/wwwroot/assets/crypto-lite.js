@@ -1,13 +1,4 @@
-/*
- * crypto-lite.js —— 纯前端 SHA-256 / HMAC-SHA256 兜底实现。
- *
- * 为什么需要它：请求签名用到了 WebCrypto（crypto.subtle），但 crypto.subtle 只在
- * "安全上下文"（https 或 localhost/127.0.0.1）可用。如果运维把服务挂在局域网 IP 上用
- * http 访问，crypto.subtle 会直接是 undefined，签名就会失败、整个系统不可用。
- * 因此这里提供等价实现作为兜底：功能一致，性能略差（对每请求一次的签名场景无影响）。
- *
- * 注意：这**不是**密码学创新，只是标准算法的直译；安全强度与服务端校验保持一致。
- */
+//SHA-256 与 HMAC 兜底实现
 (function (global) {
   'use strict';
 
@@ -22,9 +13,10 @@
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
   ];
 
+  //字符串转 UTF-8 字节
   function utf8Bytes(text) {
     if (global.TextEncoder) return new global.TextEncoder().encode(text);
-    // 极端情况下（老浏览器）退回手工编码
+    //老浏览器退回手工编码
     var out = [];
     for (var i = 0; i < text.length; i++) {
       var c = text.charCodeAt(i);
@@ -40,8 +32,10 @@
     return new Uint8Array(out);
   }
 
+  //循环右移
   function rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
 
+  //计算 SHA-256 摘要
   function sha256Bytes(bytes) {
     var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
     var len = bytes.length;
@@ -50,9 +44,9 @@
     msg.set(bytes);
     msg[len] = 0x80;
 
-    // 长度以比特计，写入最后 8 字节（big-endian，64 位）
-    var bitLenHi = Math.floor(len / 536870912);      // len*8 / 2^32
-    var bitLenLo = (len * 8) >>> 0;
+    //写入消息比特长度
+    var bitLenHi = Math.floor(len / 536870912);      //长度高位
+    var bitLenLo = (len * 8) >>> 0;                  //长度低位
     msg[totalLen - 8] = (bitLenHi >>> 24) & 255;
     msg[totalLen - 7] = (bitLenHi >>> 16) & 255;
     msg[totalLen - 6] = (bitLenHi >>> 8) & 255;
@@ -105,6 +99,7 @@
     return out;
   }
 
+  //计算 HMAC-SHA256 摘要
   function hmacSha256Bytes(keyBytes, msgBytes) {
     var blockSize = 64;
     var key = keyBytes;
@@ -128,6 +123,7 @@
     return s;
   }
 
+  //字节转 base64
   function toBase64(bytes) {
     if (typeof btoa === 'function') {
       var binary = '';
@@ -137,6 +133,7 @@
     return Buffer.from(bytes).toString('base64');
   }
 
+  //导出兜底实现
   global.CryptoLite = {
     utf8Bytes: utf8Bytes,
     sha256Bytes: sha256Bytes,

@@ -6,17 +6,7 @@ using AiApproval.Tools;
 
 namespace AiApproval.Api;
 
-/// <summary>
-/// 接入鉴权层：健康检查 / 注册 / 登录 / 自身信息 / 改密。
-///
-/// 反暴力破解组合拳（针对"爆破 admin 后台"这类攻击）：
-///   * 每 IP 5 分钟 6 次登录尝试（超限 429）；
-///   * 每账号连续 5 次失败锁定 15 分钟（持久化，重启进程也依然锁定）；
-///   * 账号不存在时同样执行一次等价 PBKDF2 计算，消除用户名字典枚举的时间差；
-///   * 错误文案统一，不泄露"这个用户名是否存在"；
-///   * 所有失败写入审计；达阈值由 WAF 另行封禁 IP；
-///   * 非管理员越权访问 /api/admin/* 一次记 3 分（几乎立刻触发封禁）。
-/// </summary>
+//鉴权接口：健康检查、登录、改密
 public static class AuthApi
 {
     public static void Map(WebApplication app)
@@ -27,7 +17,7 @@ public static class AuthApi
             serverTime = DateTime.UtcNow,
             aiConfigured = ai.IsConfigured,
             aiModel = ai.IsConfigured ? ai.Model : null,
-            // off / degraded / online —— 只有"最近调用成功"才算 online，避免界面给出误导性状态
+            //只有最近调用成功才算 online
             aiStatus = ai.Status,
             aiLastSuccessAt = ai.LastSuccessAt,
             aiLastFailureAt = ai.LastFailureAt,
@@ -64,6 +54,7 @@ public static class AuthApi
                 id = identity.User.Id,
                 userName = identity.User.UserName,
                 displayName = identity.User.DisplayName,
+                employeeId = identity.User.EmployeeId,
                 role = identity.User.Role,
                 roleLabel = Roles.Label(identity.User.Role),
                 emailMasked = identity.User.EmailMasked,
@@ -89,16 +80,19 @@ public static class AuthApi
             var ok = await users.ChangePasswordAsync(identity.User.Id, body.NewPassword, identity.User.UserName, Api.Ip(context));
             if (!ok) return Api.Error(500, "FAILED", "口令修改失败");
 
-            // 令牌世代 +1：旧令牌立即失效，必须重新登录
+            //令牌世代 +1，旧令牌失效
             return Api.Ok(new { message = "口令已更新，请使用新口令重新登录（旧令牌已全部失效）", relogin = true });
         });
     }
 
+    //列出权限键与中文名
     private static List<object> PermissionList(string role)
-        => ToolCatalog.PermissionsOf(role)
+        => AccountPolicy.PermissionsOf(role)
+            .OrderBy(p => p, StringComparer.Ordinal)
             .Select(p => (object)new { key = p, label = Permissions.Label(p) })
             .ToList();
 
+    //登录：限流、锁定与审计
     private static async Task<IResult> LoginAsync(HttpContext context, UserService users, JwtService jwt,
         AuditLog audit, SecurityGuard guard, AppConfig cfg)
     {
@@ -152,12 +146,13 @@ public static class AuthApi
                 id = user.Id,
                 userName = user.UserName,
                 displayName = user.DisplayName,
+                employeeId = user.EmployeeId,
                 role = user.Role,
                 roleLabel = Roles.Label(user.Role),
                 emailMasked = user.EmailMasked,
                 permissions = PermissionList(user.Role),
             },
-            // 前端据此对写请求做 HMAC 签名（Anti-Replay 的前置条件）
+            //前端据此对写请求签名
             signing = new
             {
                 algorithm = "HMAC-SHA256",
@@ -168,42 +163,64 @@ public static class AuthApi
         });
     }
 
+    //注册账号是管理员行为
     private static async Task<IResult> RegisterAsync(HttpContext context, UserService users, AuditLog audit,
         SecurityGuard guard, AppConfig cfg)
     {
         var ip = Api.Ip(context);
+        var identity = Api.Identity(context);
+        if (identity is null) return Api.Error(401, "UNAUTHENTICATED", "请先登录后再创建账号");
 
-        if (!cfg.AllowSelfRegistration)
-            return Api.Error(403, "REGISTER_DISABLED", "本系统已关闭自助注册，请联系管理员开户");
-
-        if (!guard.TryConsume($"register:ip:{ip}", cfg.SelfRegistrationPerHourPerIp, TimeSpan.FromHours(1)))
+        if (!guard.TryConsume($"register:user:{identity.User.Id}", 20, TimeSpan.FromHours(1)))
         {
-            guard.Strike(ip, "注册接口请求过频", weight: 1, waf: true);
-            return Api.Error(429, "RATE_LIMITED", "注册请求过于频繁");
+            guard.Strike(ip, "创建账号过频", weight: 1, waf: true);
+            return Api.Error(429, "RATE_LIMITED", "创建账号过于频繁");
         }
 
         var body = Api.ReadBody<RegisterRequest>(context);
         if (body is null) return Api.Error(400, "BAD_REQUEST", "请求体格式错误");
 
-        // 自助注册只能拿到最低角色：角色不由客户端决定（防"注册即管理员"）
+        var role = Api.Clean(body.Role, 16).ToLowerInvariant() is { Length: > 0 } r ? r : Roles.Employee;
+        var policyError = AccountPolicy.CanCreateAccount(identity.User.Role, role);
+        if (policyError is not null)
+        {
+            await audit.WriteAsync(identity.User.Id, identity.User.UserName, identity.User.Role, ip,
+                "auth.register", Api.Clean(body.UserName, 32), "DENIED", policyError);
+            guard.Strike(ip, $"越权创建账号（{identity.User.UserName}）", weight: 2, waf: true);
+            return Api.Error(403, "FORBIDDEN", policyError);
+        }
+
         var (user, error) = await users.CreateAsync(
             Api.Clean(body.UserName, 32), body.Password ?? "", Api.Clean(body.DisplayName, 32),
-            Roles.User, Api.Clean(body.Email, 128), "self-register");
+            role, Api.Clean(body.Email, 128), identity.User.UserName);
 
         if (user is null)
         {
-            await audit.WriteAsync("", Api.Clean(body.UserName, 32), "", ip, "auth.register",
+            await audit.WriteAsync(identity.User.Id, identity.User.UserName, identity.User.Role, ip, "auth.register",
                 Api.Clean(body.UserName, 32), "FAIL", error);
             return Api.Error(400, "REGISTER_FAILED", error);
         }
 
-        await audit.WriteAsync(user.Id, user.UserName, user.Role, ip, "auth.register", user.UserName,
-            "SUCCESS", "自助注册（角色固定为“用户”）");
+        await audit.WriteAsync(identity.User.Id, identity.User.UserName, identity.User.Role, ip, "auth.register",
+            user.UserName, "SUCCESS",
+            $"由 {identity.User.UserName} 创建：角色={Roles.Label(user.Role)} 工号={user.EmployeeId} 镜像={user.MirrorState}");
 
+        var demo = users.RevealDemoPassword(user);
         return Api.Ok(new
         {
-            message = "注册成功，请登录。自助注册只提供“用户”角色，员工与管理员由管理员在后台分配。",
+            message = $"已创建账号 {user.UserName}（{Roles.Label(user.Role)}，工号 {user.EmployeeId}）",
             userName = user.UserName,
+            employeeId = user.EmployeeId,
+            role = user.Role,
+            roleLabel = Roles.Label(user.Role),
+            mirrorState = user.MirrorState,
+            mirrorDemoPassword = demo ?? "",
+            mirrorNote = user.MirrorState switch
+            {
+                "synced" => "已同步到飞书用户表",
+                "skipped" => "未配置飞书，已跳过镜像（不影响本机账号）",
+                _ => "飞书镜像失败，已静默处理（不影响本机账号），可在管理后台重试",
+            },
         });
     }
 }

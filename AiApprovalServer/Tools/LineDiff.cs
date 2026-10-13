@@ -2,17 +2,15 @@ using System.Text;
 
 namespace AiApproval.Tools;
 
-/// <summary>
-/// 行级差异（LCS 动态规划），输出类似 Git 的 +/- 变更，用于后台"这到底改了什么"的可视化。
-///
-/// 复杂度保护：DP 规模上限 600×600，超出则退化为"整体替换"摘要——
-/// 宁可给一个粗粒度结论，也不让一次超大文件对比打爆服务端 CPU/内存。
-/// </summary>
+//行级差异对比
 public static class LineDiff
 {
+    //逐行对比上限
     private const int MaxDpLines = 600;
+    //输出行数上限
     private const int MaxOutputLines = 400;
 
+    //算行级差异
     public static (string Text, int Added, int Removed) Compute(string? oldText, string? newText, int context = 3)
     {
         var oldLines = SplitLines(oldText);
@@ -20,6 +18,7 @@ public static class LineDiff
 
         if (oldLines.Length > MaxDpLines || newLines.Length > MaxDpLines)
         {
+            //太大就只给摘要
             return (
                 $"文件过大，未做逐行对比。旧文件 {oldLines.Length} 行 / 新文件 {newLines.Length} 行，" +
                 "已完整保存旧版本快照，可一键回退。",
@@ -40,7 +39,7 @@ public static class LineDiff
             }
         }
 
-        // 回溯得到操作序列
+        //回溯操作序列
         var ops = new List<(char Kind, string Text)>();
         int x = 0, y = 0;
         while (x < n && y < m)
@@ -64,7 +63,7 @@ public static class LineDiff
         while (x < n) ops.Add(('-', oldLines[x++]));
         while (y < m) ops.Add(('+', newLines[y++]));
 
-        // 只保留有变更的区块（上下各 context 行）
+        //只留有变更的区块
         var keep = new bool[ops.Count];
         for (var i = 0; i < ops.Count; i++)
         {
@@ -101,6 +100,7 @@ public static class LineDiff
         return (sb.ToString(), added, removed);
     }
 
+    //按行拆分
     private static string[] SplitLines(string? text)
     {
         if (string.IsNullOrEmpty(text)) return Array.Empty<string>();

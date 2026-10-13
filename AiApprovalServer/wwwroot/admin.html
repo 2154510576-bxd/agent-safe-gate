@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>星云游安全执行平台 · 管理后台</title>
-<link rel="stylesheet" href="/assets/app.css">
+<link rel="stylesheet" href="assets/app.css">
 </head>
 <body>
 <div id="toast-host"></div>
@@ -18,14 +18,14 @@
   <div class="topbar-spacer"></div>
   <div class="userbox" id="userbox" hidden>
     <span id="whoami" class="hint"></span>
-    <span class="badge bad">管理员</span>
-    <a class="hint" href="/biz">业务对接台</a>
+    <span class="badge bad">管理后台</span>
+    <a class="hint" href="/finance">财务工作台</a>
     <a class="hint" href="/">业务工作台</a>
     <button id="btn-logout" class="small ghost" type="button">退出登录</button>
   </div>
 </header>
 
-<!-- ============================ 管理员登录 ============================ -->
+<!-- 管理员登录 -->
 <main id="login-view" class="login-wrap">
   <div class="banner warn" id="login-banner">
     该页面是管理员专用入口，登录后所有操作都会写入带哈希链的审计日志。
@@ -44,7 +44,7 @@
   </div>
 </main>
 
-<!-- ============================ 后台主体 ============================ -->
+<!-- 后台主体 -->
 <main id="admin-view" hidden>
   <div class="layout">
     <section class="col-main">
@@ -89,8 +89,8 @@
 
 <div id="modal-host"></div>
 
-<script src="/assets/crypto-lite.js"></script>
-<script src="/assets/net.js"></script>
-<script src="/assets/admin.js"></script>
+<script src="assets/crypto-lite.js"></script>
+<script src="assets/net.js"></script>
+<script src="assets/admin.js"></script>
 </body>
 </html>

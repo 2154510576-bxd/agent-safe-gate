@@ -28,13 +28,7 @@ public sealed class IpState
     public readonly List<string> Events = new();
 }
 
-/// <summary>
-/// 运行时防线状态机（内存实现，进程重启即清零；账号锁定状态则持久化在 users.json）：
-///   * 固定窗口限流（登录、AI 对话、读接口、后台写操作各自独立桶）；
-///   * 攻击计分（strike）与自动封禁：WAF 命中累计 8 次、蜜罐探测 3 次即封禁 60 分钟；
-///   * Anti-Replay 随机数一次性校验（时间窗内 nonce 不可复用）。
-/// 内存实现的好处：不会因为"日志写满了 disk"而失效；坏处：多实例部署时要换成 Redis（已在 README 说明）。
-/// </summary>
+//运行时防线状态机（内存实现）
 public sealed class SecurityGuard
 {
     private sealed class Window
@@ -58,15 +52,13 @@ public sealed class SecurityGuard
     public long SignatureRejected { get; private set; }
     public long BannedRequests { get; private set; }
 
-    /// <summary>记录一次令牌/签名校验失败（计数器对外只读，避免外部随意改写安全指标）。</summary>
+    //记录一次签名校验失败
     public void NoteSignatureRejected() => SignatureRejected++;
 
-    /// <summary>后台写操作的每分钟上限（读自 <c>Limits:AdminWritePerMinutePerAdmin</c>）。</summary>
+    //后台写操作每分钟上限
     public int AdminWritePerMinute => _limits.AdminWritePerMinutePerAdmin;
 
-    /// <summary>业务对接台写操作的每 5 分钟上限（读自 <c>Limits:BizActionPerFiveMinutes*</c>）。</summary>
-    public int BizActionPerFiveMinutesPerUser => _limits.BizActionPerFiveMinutesPerUser;
-    public int BizActionPerFiveMinutesPerIp => _limits.BizActionPerFiveMinutesPerIp;
+
 
     public SecurityGuard(LimitOptions limits, int nonceWindowSeconds)
     {
@@ -74,9 +66,9 @@ public sealed class SecurityGuard
         _nonceWindowSeconds = nonceWindowSeconds;
     }
 
-    // ---------------------------------------------------------------- 限流
+    //限流
 
-    /// <summary>固定窗口计数。key 由调用方组合（例如 "login:ip:1.2.3.4"、"chat:user:u1"）。</summary>
+    //固定窗口计数
     public bool TryConsume(string key, int limit, TimeSpan window)
     {
         var now = DateTime.UtcNow.Ticks;
@@ -101,6 +93,7 @@ public sealed class SecurityGuard
         }
     }
 
+    //剩余配额
     public int Remaining(string key, int limit, TimeSpan window)
     {
         if (!_windows.TryGetValue(key, out var w)) return limit;
@@ -111,8 +104,9 @@ public sealed class SecurityGuard
         }
     }
 
-    // ---------------------------------------------------------------- 攻击计分 / 封禁
+    //攻击计分与封禁
 
+    //是否已被封禁
     public bool IsBanned(string ip, out DateTime until, out string reason)
     {
         until = default;
@@ -131,7 +125,7 @@ public sealed class SecurityGuard
         }
     }
 
-    /// <summary>记录一次攻击特征。weight 越大越快触发封禁（蜜罐探测权重最高）。</summary>
+    //记一次攻击特征，weight 累加
     public bool Strike(string ip, string reason, int weight = 1, bool honeypot = false, bool waf = false, bool loginFail = false)
     {
         if (weight <= 0) return false;
@@ -172,6 +166,7 @@ public sealed class SecurityGuard
         }
     }
 
+    //手动封禁
     public void Ban(string ip, string reason, int minutes)
     {
         lock (_sync)
@@ -187,6 +182,7 @@ public sealed class SecurityGuard
         }
     }
 
+    //解封
     public bool Unban(string ip)
     {
         lock (_sync)
@@ -202,6 +198,7 @@ public sealed class SecurityGuard
         }
     }
 
+    //安全态势快照
     public object Snapshot()
     {
         lock (_sync)
@@ -237,12 +234,9 @@ public sealed class SecurityGuard
         }
     }
 
-    // ---------------------------------------------------------------- Anti-Replay
+    //Anti-Replay
 
-    /// <summary>
-    /// 一次性随机数校验。同一 (主体 + nonce) 在时间窗内只能出现一次，
-    /// 保证"抓包重放"在窗口内也必然失败（就算时间戳仍有效）。
-    /// </summary>
+    //一次性随机数校验，防重放
     public bool TryUseNonce(string subject, string nonce, out string reason)
     {
         reason = "";
@@ -270,6 +264,7 @@ public sealed class SecurityGuard
         }
     }
 
+    //清理过期状态
     private void Cleanup(DateTime now)
     {
         foreach (var key in _nonces.Where(kv => kv.Value < now).Select(kv => kv.Key).ToList())
@@ -283,7 +278,7 @@ public sealed class SecurityGuard
 
     public static string ClientIp(HttpContext context)
     {
-        // 只信任连接对端地址：反向代理场景请在代理处覆盖，不要盲目信任 X-Forwarded-For（可伪造）
+        //只信任连接对端地址
         return context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
     }
 }

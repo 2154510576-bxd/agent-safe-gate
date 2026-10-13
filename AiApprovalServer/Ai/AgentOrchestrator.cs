@@ -21,27 +21,15 @@ public sealed class AgentOutcome
     public List<string> Notes { get; set; } = new();
     public List<string> InjectionFlags { get; set; } = new();
     public string ReviewVerdict { get; set; } = "";
-    /// <summary>多步执行轨迹（前端展示"先搜 → 再读 → 再写"的过程）</summary>
+    //多步执行轨迹
     public List<AgentStep> Steps { get; set; } = new();
-    /// <summary>参数被系统翻译过的记录（口语→枚举、名字→编号）</summary>
+    //参数翻译记录
     public List<string> Translations { get; set; } = new();
-    /// <summary>循环是否因为步数/时间上限而停下（此时回答基于已获得的信息）</summary>
+    //是否因步数 / 时间上限停下
     public bool StepLimitReached { get; set; }
 }
 
-/// <summary>
-/// 智能体编排器：把"一句话请求"跑完整条安全链路。
-///
-/// 链路（每一步都可能是终点）：
-///   接入身份 → 输入检测 → 上游 AI 意图解析 → 规则引擎(硬拦截) → AI 审核(软拦截，物理隔离)
-///   → 异步任务落库 → 人工审批（或直接执行）→ Harness 执行 → 快照/审计 → 结果回传
-///
-/// 关键安全性质：
-///   1) AI 只负责"翻译意图"，它输出的工具与参数一律经过规则引擎重新校验；
-///   2) 审核 AI 只看到 intent + 规范化动作，看不到用户原始输入，切断注入链路；
-///   3) 审核 AI **无权**把"需要人工审批"降级为"自动执行"——降级只可能发生在代码层；
-///   4) 管理端 AI 只读，不具备审批/执行能力，杜绝"AI 自我批准"。
-/// </summary>
+//智能体编排器：把一句话请求跑完整条安全链路
 public sealed class AgentOrchestrator
 {
     private readonly AiClient _ai;
@@ -66,6 +54,7 @@ public sealed class AgentOrchestrator
         _harness = harness;
     }
 
+    //对话入口：一句话请求
     public async Task<AgentOutcome> HandleAsync(RequestIdentity identity, string message, string? sessionId, CancellationToken ct)
     {
         var role = identity.User.Role;
@@ -86,7 +75,7 @@ public sealed class AgentOrchestrator
             return outcome;
         }
 
-        // ---------- 1) 输入侧注入检测（不阻断，只升级为人工确认） ----------
+        //输入侧注入检测（不阻断，只升级审批）
         var flags = InjectionScanner.Scan(message);
         outcome.InjectionFlags = flags;
         if (flags.Count > 0)
@@ -99,9 +88,7 @@ public sealed class AgentOrchestrator
         var history = _sessions.Snapshot(session);
         _sessions.Append(session, "user", message);
 
-        // ---------- 2~6) 多步代理循环 ----------
-        // 读类工具（检索/读取/统计）可以像代码助手那样连续调用：先搜"日报"→ 读命中的文件 → 汇总/写文件；
-        // 一旦某一步涉及状态变更（写文件、改数据、发通知），循环立即停在"人工审批"那一站。
+        //多步代理循环（读到写就停在审批）
         var steps = new List<AgentStep>();
         var observations = new List<string>();
         var executedActions = new HashSet<string>(StringComparer.Ordinal);
@@ -119,9 +106,8 @@ public sealed class AgentOrchestrator
             }
             outcome.Intent = plan.Intent;
 
-            // 管理端助手：**只读**。允许它使用任何只读工具（统计、名册、检索、只读分析），
-            // 但凡是有副作用的动作一律降级为对话——审批与执行只能在管理后台由人完成，杜绝"AI 自我批准"。
-            if (role == Roles.Admin && plan.Tool is not ("ask" or "answer"))
+            //管理端助手只读，写操作降级为对话
+            if (Roles.IsAdminSide(role) && plan.Tool is not ("ask" or "answer"))
             {
                 var adminTool = ToolCatalog.Get(plan.Tool);
                 if (adminTool is null || adminTool.StateChanging)
@@ -134,7 +120,7 @@ public sealed class AgentOrchestrator
                 }
             }
 
-            // ---------- 终局：AI 直接给结论 ----------
+            //AI 直接给结论
             if (plan.Tool is "answer" or "ask" || string.IsNullOrWhiteSpace(plan.Tool))
             {
                 outcome.Tool = plan.Tool;
@@ -145,7 +131,7 @@ public sealed class AgentOrchestrator
                     ? SynthesizeFromSteps(steps, "我没有需要执行的动作。")
                     : plan.Reply;
 
-                // "模型自己拒绝"也要留痕：用户会想知道为什么没做，安全运营也需要看到这类请求
+                //模型未调工具也要留痕
                 if (steps.Count == 0 && step == 1 && LooksLikeActionRequest(message))
                 {
                     await _audit.WriteAsync(identity.User.Id, identity.User.UserName, role, identity.Ip,
@@ -161,15 +147,14 @@ public sealed class AgentOrchestrator
 
             outcome.Tool = plan.Tool;
 
-            // ---------- 规则引擎（硬防线） ----------
+            //规则引擎（硬防线）
             var eval = await _rules.EvaluateAsync(role, identity.User.Id, plan.Tool, plan.Args, flags.Count > 0).ConfigureAwait(false);
             outcome.RiskLevel = eval.Outcome.RiskLevel;
             outcome.ActionSummary = eval.ActionSummary;
             foreach (var translation in eval.Outcome.Translations)
                 if (!outcome.Translations.Contains(translation)) outcome.Translations.Add(translation);
 
-            // 参数不明确（例如"示例"匹配到多个客户 / "新建"撞上已有文件）：不落任务，
-            // 本地/降级模式直接回候选；AI 模式则把候选喂回去让它自己选（追加/覆盖/改名…）
+            //参数不明确则回问候选
             if (eval.Outcome.Decision == "ASK")
             {
                 var question = string.Join("；", eval.Outcome.Reasons);
@@ -188,7 +173,7 @@ public sealed class AgentOrchestrator
                     return outcome;
                 }
 
-                continue;   // 让 AI 拿候选再试一次（或改成问用户）
+                continue;   //让 AI 拿候选再试一次
             }
 
             if (eval.Outcome.Decision == "DENY")
@@ -209,7 +194,7 @@ public sealed class AgentOrchestrator
 
             var tool = ToolCatalog.Get(plan.Tool)!;
 
-            // ---------- 无进展收敛：同一个动作重复出现时不再重复执行，直接用已有结果作答 ----------
+            //无进展收敛：重复动作不再执行
             var canonicalAction = eval.Outcome.CanonicalAction;
             if (canonicalAction.Length > 0 && executedActions.Contains(canonicalAction))
             {
@@ -236,7 +221,7 @@ public sealed class AgentOrchestrator
             toolCallCount[tool.Name] = toolCallCount.GetValueOrDefault(tool.Name) + 1;
             if (canonicalAction.Length > 0) executedActions.Add(canonicalAction);
 
-            // ---------- 写操作：审核 + 人工审批，然后结束循环 ----------
+            //写操作：安全审核 + 人工审批
             if (tool.StateChanging)
             {
                 var review = await ReviewAsync(identity, plan, eval, ct).ConfigureAwait(false);
@@ -288,7 +273,7 @@ public sealed class AgentOrchestrator
                     ? (string.IsNullOrWhiteSpace(plan.Reply) ? executedSummary : plan.Reply + "\n" + executedSummary)
                     : "执行未成功：" + executedSummary;
 
-                if (role == Roles.Admin && tool.AdminOnly && _ai.IsConfigured)
+                if (Roles.IsAdminSide(role) && tool.AdminOnly && _ai.IsConfigured)
                 {
                     var summary = await SummarizeAsync(executed.ResultJson, ct).ConfigureAwait(false);
                     if (!string.IsNullOrWhiteSpace(summary)) outcome.Reply = summary;
@@ -298,7 +283,7 @@ public sealed class AgentOrchestrator
                 return outcome;
             }
 
-            // ---------- 只读操作：立即执行，把真实结果作为"观察"喂回，继续下一步 ----------
+            //只读操作：立即执行，结果作为观察继续
             var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             var transient = new AgentTask
             {
@@ -334,14 +319,13 @@ public sealed class AgentOrchestrator
             if (!readResult.Ok)
                 outcome.Notes.Add($"第 {step} 步未成功（{readResult.Summary}）：可换关键字或先用 search_files 确认目标是否存在。");
 
-            // 本地/降级模式（单步）：直接按工具执行结果返回，行为与"没有多步循环"时一致——
-            // 用户要的是"列出文件"，不该被包装成"我完成了 N 步"。
+            //本地 / 降级模式（单步）直接返回结果
             if (plan.Source == "local-fallback")
             {
                 outcome.Steps = steps;
                 outcome.Status = readResult.Ok ? TaskState.Executed : TaskState.Failed;
                 outcome.StatusLabel = TaskState.Label(outcome.Status);
-                // 与"任务执行结果"同构的信封（前端与脚本都按 {ok,summary,data} 取数）
+                //与任务执行结果同构的信封
                 outcome.Result = new { ok = readResult.Ok, summary = readResult.Summary, data = readResult.Data };
                 outcome.Reply = string.IsNullOrWhiteSpace(plan.Reply)
                     ? readResult.Summary
@@ -350,7 +334,7 @@ public sealed class AgentOrchestrator
                 return outcome;
             }
 
-            // ---------- 达到步数/时间上限：用已获得的信息收尾 ----------
+            //达到步数 / 时间上限，用已有信息收尾
             if (step >= maxSteps || DateTime.UtcNow > deadline)
             {
                 outcome.Steps = steps;
@@ -368,7 +352,7 @@ public sealed class AgentOrchestrator
             }
         }
 
-        // 兜底（循环正常都会在内部 return）
+        //兜底
         outcome.Steps = steps;
         outcome.Status = "CHAT";
         outcome.StatusLabel = "对话";
@@ -376,24 +360,14 @@ public sealed class AgentOrchestrator
         return outcome;
     }
 
-    /// <summary>
-    /// 审批判定（单一出口，对话入口与业务对接台共用）。
-    ///
-    /// 规则（只升不降）：
-    ///   1) 工具静态策略要求审批 → 审批；
-    ///   2) AI 审核判 review / 给出高风险 → 审批；
-    ///   3) 规则引擎静态风险 ≥ 高（覆盖、删除、共享区、脚本内容…）→ 审批；
-    ///   4) 输入疑似提示词注入 → 审批；
-    ///   5) AI 审核不可用：默认一律审批，**除非**它是"沙箱内低风险写"（个人区新建/追加/改名、无风险命中），
-    ///      这种情况按配置 AutoApproveSandboxWrites 放行（仍落快照与审计）。
-    /// </summary>
+    //审批判定（只升不降）
     private static (bool RequiresApproval, string Note) DecideApproval(RuleEvaluation eval, ReviewOutcome review,
         List<string> flags, AppConfig cfg)
     {
         var note = "";
         var requiresApproval = eval.Outcome.RequiresApproval;
 
-        // "沙箱内低风险"是规则引擎给出的、带证据的显式判定（私人工作区 + 普通文本 + 无风险命中 + 非注入输入）
+        //沙箱内低风险是规则引擎给出的显式判定
         var sandboxAuto = eval.Outcome.SandboxAutoAllowed && cfg.AutoApproveSandboxWrites && flags.Count == 0
                           && review.Verdict != "review" && Risk.Rank(review.RiskLevel) < Risk.Rank(Risk.High);
 
@@ -401,7 +375,7 @@ public sealed class AgentOrchestrator
         if (Risk.Rank(review.RiskLevel) >= Risk.Rank(Risk.High)) requiresApproval = true;
         if (flags.Count > 0) requiresApproval = true;
 
-        // 工具目录里的静态风险只是"默认档"：本次已被规则引擎判定为沙箱内低风险时不应再被它拦住
+        //沙箱内低风险不再被静态档拦住
         if (Risk.Rank(eval.Outcome.RiskLevel) >= Risk.Rank(Risk.High) && !sandboxAuto) requiresApproval = true;
 
         if (!review.Available)
@@ -428,7 +402,7 @@ public sealed class AgentOrchestrator
         return (requiresApproval, note);
     }
 
-    /// <summary>粗略判断"用户这句话是不是在要求做一个操作"（用于给"模型直接作答未调用工具"留痕）。</summary>
+    //是否像在要求做一个操作
     private static bool LooksLikeActionRequest(string message)
     {
         if (string.IsNullOrWhiteSpace(message)) return false;
@@ -437,7 +411,7 @@ public sealed class AgentOrchestrator
         return verbs.Any(v => message.Contains(v, StringComparison.Ordinal));
     }
 
-    /// <summary>把多步观察压成一段结论（AI 不可用时的兜底，保证"总有结果可说"）。</summary>
+    //把多步观察压成一段结论
     private static string SynthesizeFromSteps(List<AgentStep> steps, string fallback)
     {
         if (steps.Count == 0) return fallback;
@@ -446,7 +420,7 @@ public sealed class AgentOrchestrator
         return "已执行以下步骤：\n" + string.Join("\n", lines);
     }
 
-    /// <summary>多步完成后让 AI 把观察汇总成给用户的结论（失败就回退到本地摘要）。</summary>
+    //让 AI 把观察汇总成结论
     private async Task<string> FinalizeAsync(RequestIdentity identity, string message, List<string> observations, CancellationToken ct)
     {
         if (observations.Count == 0) return "";
@@ -470,13 +444,7 @@ public sealed class AgentOrchestrator
         return Truncate(dto?.Reply ?? "", 1500);
     }
 
-    /// <summary>
-    /// 结构化业务动作入口（业务对接台用）。
-    ///
-    /// 与对话入口的唯一区别：**动作由业务界面明确指定**（按钮 → tool + 参数），不再让上游 AI 猜意图。
-    /// 后面的链路完全相同：参数白名单 → 权限 → 业务硬规则 → AI 安全审核 → 必要的人工审批 → 快照与审计。
-    /// 也就是说，**业务界面同样没有"直接改数据库"的旁路**。
-    /// </summary>
+    //结构化业务动作入口
     public async Task<AgentOutcome> HandleActionAsync(RequestIdentity identity, string tool,
         Dictionary<string, string> args, string? businessReason, CancellationToken ct)
     {
@@ -506,7 +474,7 @@ public sealed class AgentOrchestrator
         outcome.Tool = plan.Tool;
         outcome.Intent = plan.Intent;
 
-        // 业务界面提交的参数同样做注入特征扫描（"修改理由"字段可能被用来夹带指令）
+        //业务参数同样做注入扫描
         var scanned = string.Join('\n', args.Select(kv => kv.Value)) + "\n" + (businessReason ?? "");
         var flags = InjectionScanner.Scan(scanned);
         outcome.InjectionFlags = flags;
@@ -524,9 +492,7 @@ public sealed class AgentOrchestrator
         return await RunPlanAsync(identity, session, plan, flags, rawInput, outcome, ct).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// 两个入口共用的执行链路（规则引擎 → 审核 → 审批/执行）。任何分支都不会绕过这里。
-    /// </summary>
+    //两个入口共用的执行链路
     private async Task<AgentOutcome> RunPlanAsync(RequestIdentity identity, ChatSession session, IntentPlan plan,
         List<string> flags, string rawInput, AgentOutcome outcome, CancellationToken ct)
     {
@@ -535,7 +501,7 @@ public sealed class AgentOrchestrator
         outcome.Tool = plan.Tool;
         outcome.Intent = plan.Intent;
 
-        // ---------- 纯对话 ----------
+        //纯对话
         if (plan.Tool == "ask" || string.IsNullOrWhiteSpace(plan.Tool))
         {
             if (ToolCatalog.Get(plan.Tool) is null && plan.Tool != "ask" && !string.IsNullOrWhiteSpace(plan.Tool))
@@ -548,7 +514,7 @@ public sealed class AgentOrchestrator
             return outcome;
         }
 
-        // ---------- 规则引擎（硬防线） ----------
+        //规则引擎（硬防线）
         var injectionSuspected = flags.Count > 0;
         var eval = await _rules.EvaluateAsync(role, identity.User.Id, plan.Tool, plan.Args, injectionSuspected).ConfigureAwait(false);
         outcome.RiskLevel = eval.Outcome.RiskLevel;
@@ -556,7 +522,7 @@ public sealed class AgentOrchestrator
         foreach (var translation in eval.Outcome.Translations)
             if (!outcome.Translations.Contains(translation)) outcome.Translations.Add(translation);
 
-        // 结构化业务动作同样支持"参数不明确 → 让界面提示候选"
+        //参数不明确则让界面提示候选
         if (eval.Outcome.Decision == "ASK")
         {
             outcome.Status = "NEED_INPUT";
@@ -583,7 +549,7 @@ public sealed class AgentOrchestrator
             return outcome;
         }
 
-        // ---------- AI 安全审核（软防线，仅对"有副作用的动作"） ----------
+        //AI 安全审核（软防线，只对有副作用的动作）
         var tool = ToolCatalog.Get(plan.Tool)!;
         var review = new ReviewOutcome { Verdict = "skipped", Available = false, RiskLevel = eval.Outcome.RiskLevel };
 
@@ -611,8 +577,8 @@ public sealed class AgentOrchestrator
             outcome.ReviewVerdict = "not-required";
         }
 
-        // ---------- 是否必须人工审批（代码决定，AI 无权下调）----------
-        // 只有"有副作用的动作"才谈审批：只读工具（查文件信息、看权限、检索、统计…）一律直接执行。
+        //是否必须人工审批由代码决定，AI 无权下调
+        //只读工具一律直接执行
         var requiresApproval = false;
         if (tool.StateChanging)
         {
@@ -633,7 +599,7 @@ public sealed class AgentOrchestrator
             return outcome;
         }
 
-        // ---------- 自动执行（只可能是"低风险 + 无副作用"或策略明确放行的动作） ----------
+        //自动执行（低风险或策略放行）
         var autoTask = await _tasks.CreateAsync(identity, plan, eval, review, rawInput, flags, false).ConfigureAwait(false);
         var executed = await _tasks.ExecuteAsync(autoTask, "策略允许自动执行").ConfigureAwait(false);
 
@@ -642,8 +608,7 @@ public sealed class AgentOrchestrator
         outcome.TaskId = executed.Id;
         outcome.Result = AppJson.Deserialize<object>(executed.ResultJson);
 
-        // 关键取舍：工具真的执行完之后，**以执行结果为准**，不用 AI 在"还不知道结果"时写的那句推测性回复。
-        // （AI 的回复可能说"已提交审批"，而实际是自动放行的；也可能说"正在读取"，而文件其实不存在。）
+        //以执行结果为准，不用 AI 的推测性回复
         var executedSummary = ExtractSummary(executed.ResultJson, executed.StatusReason);
         if (executed.Status == TaskState.Executed)
             outcome.Reply = string.IsNullOrWhiteSpace(plan.Reply)
@@ -652,8 +617,8 @@ public sealed class AgentOrchestrator
         else
             outcome.Reply = "执行未成功：" + executedSummary;
 
-        // 管理端只读工具：用工具结果再问一次 AI，得到自然语言结论
-        if (role == Roles.Admin && tool.AdminOnly && _ai.IsConfigured)
+        //管理端只读工具：再问一次 AI 拿自然语言结论
+        if (Roles.IsAdminSide(role) && tool.AdminOnly && _ai.IsConfigured)
         {
             var summary = await SummarizeAsync(executed.ResultJson, ct).ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(summary)) outcome.Reply = summary;
@@ -663,8 +628,7 @@ public sealed class AgentOrchestrator
         return outcome;
     }
 
-    // ------------------------------------------------------------------ 上游 AI 规划
-
+    //上游 AI 规划
     private async Task<(IntentPlan Plan, List<string> Notes)> PlanAsync(RequestIdentity identity, string message,
         List<ChatMessage> history, List<string> flags, List<string> observations, int step, CancellationToken ct)
     {
@@ -680,7 +644,7 @@ public sealed class AgentOrchestrator
         if (!allowed)
         {
             notes.Add($"今日 AI 调用额度已用尽（{used}/{_cfg.Ai.DailyCallsPerUser}），已切换到本地意图解析。");
-            // 第一步退回本地解析；已经开始多步之后则用已获得的信息收尾
+            //第一步退回本地解析
             return step == 1
                 ? (LocalIntentParser.Parse(message, identity.User.Role), notes)
                 : (new IntentPlan { Tool = "answer", Reply = "", Source = "quota-fallback" }, notes);
@@ -688,7 +652,7 @@ public sealed class AgentOrchestrator
 
         var toolSchema = BuildToolSchema(identity.User.Role, out var adminOnly);
 
-        var systemPrompt = identity.User.Role == Roles.Admin
+        var systemPrompt = Roles.IsAdminSide(identity.User.Role)
             ? Prompts.AdminAnalyst(identity.User.DisplayName)
             : Prompts.Planner(identity.User.Role, identity.User.DisplayName, ToolCatalog.PermissionsOf(identity.User.Role), toolSchema);
 
@@ -703,8 +667,7 @@ public sealed class AgentOrchestrator
             await _audit.WriteAsync(identity.User.Id, identity.User.UserName, identity.User.Role, identity.Ip,
                 "ai.plan", "chat", "FALLBACK", result.Error).ConfigureAwait(false);
 
-            // 第一步失败 → 仍然退回本地意图解析（保证"AI 挂了也能用"，防线不变）；
-            // 已经开始多步之后失败 → 用已获得的步骤结果收尾，不要再重猜一遍。
+            //首步失败退回本地解析，多步后失败则收尾
             if (step == 1)
             {
                 notes.Add($"AI 调用失败（{result.Error}），已降级为本地意图解析；状态变更类操作仍需人工审批。");
@@ -733,14 +696,15 @@ public sealed class AgentOrchestrator
         return (plan, notes);
     }
 
-    /// <summary>按角色生成可用工具清单（管理端只给只读分析工具）。</summary>
+    //按角色生成可用工具清单
     private static string BuildToolSchema(string role, out bool adminOnly)
     {
-        adminOnly = role == Roles.Admin;
+        //超管同属管理端，只认 admin 会漏掉工具清单
+        adminOnly = Roles.IsAdminSide(role);
         return adminOnly ? BuildAdminSchema() : ToolCatalog.SchemaForPrompt(role);
     }
 
-    /// <summary>管理端可用工具清单：**全部只读工具**（写操作在管理端一律不开放给 AI）。</summary>
+    //管理端工具清单（全部只读）
     private static string BuildAdminSchema()
     {
         var lines = ToolCatalog.ForRole(Roles.Admin)
@@ -750,11 +714,7 @@ public sealed class AgentOrchestrator
         return string.Join('\n', lines);
     }
 
-    /// <summary>
-    /// 组装上游上下文：历史对话里的用户内容同样被 XML 标签包裹，
-    /// 避免"上一轮的注入文本"在新一轮里以裸文本形式进入模型视野；
-    /// 多步循环中还会带上**已经执行过的只读步骤及其真实结果**（观察）。
-    /// </summary>
+    //组装上游上下文
     private static string BuildContext(List<ChatMessage> history, string current, List<string> observations, int step)
     {
         var sb = new System.Text.StringBuilder();
@@ -788,6 +748,7 @@ public sealed class AgentOrchestrator
         return sb.ToString();
     }
 
+    //解析上游返回的意图计划
     private static IntentPlan? ParsePlan(string content, string role)
     {
         var json = AppJson.ExtractFirstJsonObject(content);
@@ -799,13 +760,11 @@ public sealed class AgentOrchestrator
         var allowed = ToolCatalog.ForRole(role).Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var tool = (parsed.Tool ?? "answer").Trim();
 
-        // 终局信号：answer/ask 都表示"不调工具"；ask 兼容旧格式
+        //answer / ask 都表示不调工具
         if (tool.Equals("ask", StringComparison.OrdinalIgnoreCase))
             tool = "answer";
 
-        // 目录里根本没有的工具名（模型幻觉/注入诱导）→ 降级为对话，不把内部清单暴露给用户。
-        // 注意：**目录里有、但当前角色没权限**的工具要保留，交由规则引擎明确拒绝并记审计——
-        // 否则会被静默降级成一句"正在处理…"，用户既不知道为什么没做，审计里也看不到这次越权尝试。
+        //目录外的工具名降级为对话；无权限的保留给规则引擎记审计
         if (tool != "answer" && ToolCatalog.Get(tool) is null)
             tool = "answer";
 
@@ -839,8 +798,7 @@ public sealed class AgentOrchestrator
         public bool Done { get; set; }
     }
 
-    // ------------------------------------------------------------------ 审核 AI（物理隔离）
-
+    //审核 AI（物理隔离）
     private async Task<ReviewOutcome> ReviewAsync(RequestIdentity identity, IntentPlan plan, RuleEvaluation eval, CancellationToken ct)
     {
         if (!_ai.IsConfigured)
@@ -866,7 +824,7 @@ public sealed class AgentOrchestrator
             };
         }
 
-        // 物理隔离：只传 intent + 规范化动作，绝不传用户原始输入
+        //只传 intent 与规范化动作，不传原始输入
         var userContent = Prompts.WrapAction(plan.Intent, plan.Tool, eval.Outcome.CanonicalAction,
             eval.Outcome.RiskLevel, identity.User.Role);
 
@@ -895,12 +853,13 @@ public sealed class AgentOrchestrator
         return review;
     }
 
+    //解析审核结论
     private static ReviewOutcome ParseReview(string content, string fallbackRisk)
     {
         var json = AppJson.ExtractFirstJsonObject(content);
         if (json is null)
         {
-            // 审核返回不可解析 → 视为"需要人工"，绝不默认放行
+            //审核返回不可解析则转人工，绝不默认放行
             return new ReviewOutcome
             {
                 Verdict = "review",
@@ -936,7 +895,7 @@ public sealed class AgentOrchestrator
         {
             Verdict = verdict,
             Available = true,
-            RiskLevel = Risk.Max(risk, fallbackRisk),   // 只升不降
+            RiskLevel = Risk.Max(risk, fallbackRisk),   //只升不降
             Category = Truncate(dto.Category ?? "", 32),
             Reason = Truncate(string.IsNullOrWhiteSpace(dto.Reason) ? "无具体理由" : dto.Reason!, 80),
             Raw = Truncate(content, 200),
@@ -951,6 +910,7 @@ public sealed class AgentOrchestrator
         public string? Reason { get; set; }
     }
 
+    //让 AI 给管理端结论
     private async Task<string> SummarizeAsync(string resultJson, CancellationToken ct)
     {
         var prompt = "你是管理端安全分析助手。下面是一段系统返回的结构化数据，请用不超过 200 字的中文给出结论与建议。"
@@ -977,13 +937,14 @@ public sealed class AgentOrchestrator
         public string? Summary { get; set; }
     }
 
+    //取执行摘要
     private static string ExtractSummary(string resultJson, string fallback)
     {
         var dto = AppJson.Deserialize<ResultDto>(resultJson);
         return string.IsNullOrWhiteSpace(dto?.Summary) ? (string.IsNullOrWhiteSpace(fallback) ? "已完成。" : fallback) : dto!.Summary!;
     }
 
-    /// <summary>统一截断：所有进入提示词/审计/响应的外部文本都必须有长度上限。</summary>
+    //统一截断外部文本
     private static string Truncate(string? value, int max)
     {
         if (string.IsNullOrEmpty(value)) return "";
@@ -991,6 +952,7 @@ public sealed class AgentOrchestrator
         return cleaned.Length <= max ? cleaned : cleaned[..max];
     }
 
+    //拼待审批回复
     private static string BuildPendingReply(IntentPlan plan, AgentTask task, RuleEvaluation eval, ReviewOutcome review,
         List<AgentStep>? steps = null)
     {

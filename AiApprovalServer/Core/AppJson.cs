@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace AiApproval.Core;
 
-/// <summary>全局 JSON 约定：camelCase 输出、忽略 null、不缩进（缩进只用于落盘）。</summary>
+//全局 JSON 约定
 public static class AppJson
 {
     public static readonly JsonSerializerOptions Wire = new()
@@ -22,9 +22,11 @@ public static class AppJson
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
+    //序列化，disk=true 缩进落盘
     public static string Serialize(object value, bool disk = false)
         => JsonSerializer.Serialize(value, disk ? Disk : Wire);
 
+    //反序列化，失败返回 null
     public static T? Deserialize<T>(string? json)
     {
         if (string.IsNullOrWhiteSpace(json)) return default;
@@ -32,10 +34,7 @@ public static class AppJson
         catch { return default; }
     }
 
-    /// <summary>
-    /// 从"可能不干净"的模型输出里提取第一个合法 JSON 对象。
-    /// 多级容错：原文 → 去 ``` 围栏 → 花括号配平截取。绝不因为解析失败就当作安全。
-    /// </summary>
+    //从模型输出里提取第一个 JSON 对象
     public static string? ExtractFirstJsonObject(string? text)
     {
         if (string.IsNullOrEmpty(text)) return null;
@@ -48,6 +47,7 @@ public static class AppJson
         return Balanced(candidate[start..]);
     }
 
+    //花括号配平截取
     private static string? Balanced(string text)
     {
         var depth = 0;
@@ -78,6 +78,7 @@ public static class AppJson
         return null;
     }
 
+    //剥掉围栏标记
     public static string StripFence(string text)
     {
         var t = text.Trim();

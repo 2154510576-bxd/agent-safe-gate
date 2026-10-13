@@ -1,13 +1,4 @@
-/*
- * inspect-activity.mjs —— 使用轨迹还原（运维/取证用，只读本地数据）。
- *
- * 作用：把 tasks.json + audit.jsonl 还原成"谁在什么时候说了什么 → AI 怎么理解 → 系统怎么处置 → 结果如何"的时间线。
- * 其中用户原始输入是 AES-256-GCM 加密存放的（见 Services/TaskService.cs），本脚本用 App_Data/secrets.json
- * 里的主密钥按同样的派生方式解密——所以它**只能在本机、且有数据目录读取权限时**运行。
- *
- * 用法： node inspect-activity.mjs [数据目录] [--user 用户名] [--last N]
- *   默认数据目录： ../AiApprovalServer/bin/Debug/net8.0/App_Data
- */
+//还原使用轨迹（只读本地数据）
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -15,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 
+//解析命令行参数
 const args = process.argv.slice(2);
 let dataRoot = '';
 let userFilter = '';
@@ -26,18 +18,19 @@ for (let i = 0; i < args.length; i++) {
 }
 if (!dataRoot) dataRoot = path.resolve('../AiApprovalServer/bin/Debug/net8.0/App_Data');
 
+//读 JSON，失败取默认值
 function readJson(name, fallback) {
   try { return JSON.parse(fs.readFileSync(path.join(dataRoot, name), 'utf8')); }
   catch { return fallback; }
 }
 
-/** 与 AppConfig.DeriveKey("raw-input") 等价：HMAC(key=AesKey, msg="aiapproval:raw-input:"+pepper) */
+//派生原始输入的解密密钥
 function deriveRawInputKey(secrets, pepper) {
   const aesKey = Buffer.from(secrets.aes, 'base64');
   return crypto.createHmac('sha256', aesKey).update('aiapproval:raw-input:' + pepper, 'utf8').digest();
 }
 
-/** 与 Crypto.AesGcmEncrypt 的格式一致：base64( nonce(12) | tag(16) | cipher )，AAD = "task-raw|"+taskId */
+//解密任务原始输入
 function decryptRawInput(cipherB64, key, taskId) {
   if (!cipherB64) return '';
   try {
@@ -55,7 +48,7 @@ function decryptRawInput(cipherB64, key, taskId) {
 }
 
 const secrets = readJson('secrets.json', {});
-// appsettings 不在数据目录里，按脚本位置定位（tests/../AiApprovalServer/appsettings.json）
+//appsettings 按脚本位置找
 let pepper = '';
 try {
   const appSettings = JSON.parse(fs.readFileSync(path.join(scriptDir, '..', 'AiApprovalServer', 'appsettings.json'), 'utf8'));
@@ -64,10 +57,12 @@ try {
 const rawKey = secrets.aes ? deriveRawInputKey(secrets, pepper) : null;
 console.log(`（解密密钥：${rawKey ? '已从 secrets.json 派生' : '缺失'}；pepper=${pepper ? '已读取' : '为空'}）`);
 
+//读取任务与审计日志
 const tasks = readJson('tasks.json', []);
 const audit = fs.readFileSync(path.join(dataRoot, 'audit.jsonl'), 'utf8').trim().split('\n')
   .map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
 
+//按用户筛选并按时间排序
 const filtered = (userFilter ? tasks.filter(t => t.userName === userFilter) : tasks)
   .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 const shown = lastN > 0 ? filtered.slice(-lastN) : filtered;
@@ -75,6 +70,7 @@ const shown = lastN > 0 ? filtered.slice(-lastN) : filtered;
 console.log(`数据目录：${dataRoot}`);
 console.log(`任务 ${tasks.length} 条（本次展示 ${shown.length} 条）｜审计 ${audit.length} 条\n`);
 
+//逐条输出任务时间线
 for (const t of shown) {
   const raw = rawCipherOrPlain(t);
   const ruleReasons = (t.rule?.reasons || []).join('；');
@@ -83,7 +79,7 @@ for (const t of shown) {
   try {
     const r = t.resultJson ? JSON.parse(t.resultJson) : null;
     result = r ? (r.summary || '') : '';
-  } catch { /* ignore */ }
+  } catch { /*忽略解析失败*/ }
 
   console.log('────────────────────────────────────────────────────────');
   console.log(`[${new Date(t.createdAt).toLocaleString('zh-CN')}] ${t.userName}（${t.userRole}）`);
@@ -99,6 +95,7 @@ for (const t of shown) {
   if (result) console.log(`  执行结果 : ${result.replace(/\n/g, ' ').slice(0, 400)}`);
   if ((t.versionIds || []).length) console.log(`  版本记录 : ${t.versionIds.join(', ')}`);
 
+  //取用户原始输入
   function rawCipherOrPlain(task) {
     if (!task.rawInputCipher) return '（无）';
     if (!rawKey) return '（secrets.json 缺失，无法解密）';
@@ -106,7 +103,7 @@ for (const t of shown) {
   }
 }
 
-// AI 调用情况（能看出是真实模型还是降级/假模型）
+//AI 调用情况
 const plans = audit.filter(a => a.action === 'ai.plan');
 const fallbacks = plans.filter(p => p.outcome === 'FALLBACK');
 console.log('\n────────────────────────────────────────────────────────');
@@ -116,6 +113,7 @@ const tokens = plans.filter(p => /tokens=(\d+)\/(\d+)/.test(p.detail || ''))
   .map(p => { const m = p.detail.match(/tokens=(\d+)\/(\d+)/); return Number(m[1]) + Number(m[2]); });
 if (tokens.length) console.log(`  模型 token 用量合计约 ${tokens.reduce((a, b) => a + b, 0)}（${tokens.length} 次成功调用）`);
 
+//统计被拦与被打回
 const rejects = audit.filter(a => a.action.startsWith('task.reject'));
 console.log(`\n被拦/被打回 ${rejects.length} 次：`);
 for (const r of rejects.slice(-10)) console.log(`  [${new Date(r.time).toLocaleString('zh-CN')}] ${r.actorName || '系统'} ${r.target} ${r.outcome} —— ${r.detail}`);

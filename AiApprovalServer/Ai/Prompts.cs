@@ -4,20 +4,10 @@ using AiApproval.Tools;
 
 namespace AiApproval.Ai;
 
-/// <summary>
-/// 提示词工厂。
-///
-/// 三个视角（用户 / 员工 / 管理员）各有独立系统提示词，权限范围、可用工具、行为约束都不同：
-///   * 用户视角：只能操作自己的个人工作区与只读业务数据；
-///   * 员工视角：可读共享区、可修改业务数据（仍然全部要过审批）；
-///   * 管理员视角：只做**只读**分析（待审批任务、审计检索），绝不执行破坏性动作——
-///     防止"AI 自我批准"这种最危险的失控路径。
-///
-/// 注入防护的关键做法：用户输入被包进 &lt;user_input&gt; 标签，且标签内的 &lt; &gt; 被转义，
-/// 模型无法提前闭合标签把内容"提升"成系统指令。
-/// </summary>
+//提示词工厂
 public static class Prompts
 {
+    //用户视角意图解析提示词
     public static string Planner(string role, string displayName, string[] permissions, string toolSchema)
     {
         var sb = new StringBuilder();
@@ -85,6 +75,7 @@ public static class Prompts
         return sb.ToString();
     }
 
+    //安全审核员提示词
     public static string Reviewer() => """
         你是独立于业务助手之外的“操作安全审核员”。你的输入只有结构化动作描述，没有任何用户原始输入（物理隔离设计）。
 
@@ -113,6 +104,7 @@ public static class Prompts
         - 宁可多让一个人点一次确认，也不要放过一次不可逆的破坏操作。
         """;
 
+    //管理端分析助手提示词
     public static string AdminAnalyst(string displayName)
     {
         var sb = new StringBuilder();
@@ -141,14 +133,14 @@ public static class Prompts
         return sb.ToString();
     }
 
-    /// <summary>把不可信文本包进 XML 标签：转义 &lt; &gt; 后，标签无法被提前闭合。</summary>
+    //包裹不可信输入（转义尖括号）
     public static string WrapUserInput(string? text)
     {
         var safe = Escape(text);
         return "<user_input>\n" + safe + "\n</user_input>";
     }
 
-    /// <summary>审核端同样只接收"结构化的动作"，且同样做标签转义。</summary>
+    //包裹待审核动作
     public static string WrapAction(string intent, string toolName, string canonicalActionJson, string ruleRisk, string actorRole)
     {
         var sb = new StringBuilder();
@@ -165,6 +157,7 @@ public static class Prompts
         return sb.ToString();
     }
 
+    //转义尖括号与控制字符
     public static string Escape(string? text)
     {
         if (string.IsNullOrEmpty(text)) return "";

@@ -2,20 +2,12 @@ using AiApproval.Core;
 
 namespace AiApproval.Tools;
 
-/// <summary>
-/// 路径守卫：所有文件操作的唯一入口（硬白名单）。
-///
-/// 拦截的越权/逃逸手法：
-///   * 相对穿越：../../etc/passwd、..%2f、....// 
-///   * 绝对路径：/etc/passwd、C:\Windows\System32
-///   * 备用数据流与非法字符：file.txt::$DATA、文件中的 \0
-///   * Windows 设备名：CON、PRN、AUX、NUL、COM1..COM9、LPT1..LPT9
-///   * 符号链接/目录联接逃逸：目标路径的任意祖先目录是 reparse point（指向白名单之外）
-///   * 规范化后是否仍在白名单根目录之下（最终一道防线，防"规则看漏了某种编码"）
-/// </summary>
+//文件路径白名单入口
 public sealed class PathGuard
 {
+    //非法字符
     private static readonly char[] InvalidChars = { '<', '>', ':', '"', '|', '?', '*', '\0', '\u0001' };
+    //系统保留名
     private static readonly string[] ReservedNames =
     {
         "CON", "PRN", "AUX", "NUL",
@@ -23,37 +15,39 @@ public sealed class PathGuard
         "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     };
 
+    //相对路径长度上限
     public const int MaxRelativePathLength = 200;
 
     private readonly AppConfig _cfg;
 
     public PathGuard(AppConfig cfg) => _cfg = cfg;
 
+    //用户工作区根
     public string UserRoot(string userId) => Path.GetFullPath(Path.Combine(_cfg.WorkspacesDir, "u_" + userId));
 
+    //共享区根
     public string ShareRoot() => Path.GetFullPath(Path.Combine(_cfg.WorkspacesDir, "share"));
 
+    //按范围取根目录
     public string ScopeRoot(string userId, string scope) =>
         string.Equals(scope, "share", StringComparison.OrdinalIgnoreCase) ? ShareRoot() : UserRoot(userId);
 
-    /// <summary>
-    /// 解析用户请求的路径。成功时返回白名单内的绝对路径与规范化相对路径（统一用 / 分隔，供审计展示）。
-    /// </summary>
+    //解析并校验路径
     public (bool Ok, string Error, string FullPath, string Relative) Resolve(string userId, string? scope, string? requestedPath)
     {
         var normalizedScope = string.Equals(scope?.Trim(), "share", StringComparison.OrdinalIgnoreCase) ? "share" : "private";
         var root = ScopeRoot(userId, normalizedScope);
 
         var raw = (requestedPath ?? "").Trim().Replace('\\', '/');
-        // 根目录的几种写法统一成""，否则"./"会被当成"以点结尾的非法目录名"
+        //根目录写法统一
         while (raw.StartsWith("./", StringComparison.Ordinal)) raw = raw[2..];
         if (raw is "." or "/") raw = "";
 
         if (raw.Length > MaxRelativePathLength) return Fail($"路径过长（上限 {MaxRelativePathLength} 字符）");
 
-        // 统一分隔符，便于检查穿越
         var unified = raw;
 
+        //逐项拦截逃逸写法
         if (unified.Contains('\0')) return Fail("路径包含非法字符");
         if (unified.Contains("..")) return Fail("路径不得包含上级目录引用（..）");
         if (unified.StartsWith('/')) return Fail("禁止使用绝对路径");
@@ -61,6 +55,7 @@ public sealed class PathGuard
         if (unified.Contains("$DATA", StringComparison.OrdinalIgnoreCase)) return Fail("禁止使用备用数据流");
         if (unified.Contains("::")) return Fail("路径包含非法字符");
 
+        //检查每段文件名
         foreach (var segment in unified.Split('/', StringSplitOptions.RemoveEmptyEntries))
         {
             if (segment.IndexOfAny(InvalidChars) >= 0) return Fail("路径包含非法字符");
@@ -79,6 +74,7 @@ public sealed class PathGuard
             return Fail("路径格式非法");
         }
 
+        //规范化后必须仍在根目录内
         var rootWithSep = root.EndsWith(Path.DirectorySeparatorChar) ? root : root + Path.DirectorySeparatorChar;
         if (!full.StartsWith(rootWithSep, StringComparison.OrdinalIgnoreCase) &&
             !string.Equals(full, root, StringComparison.OrdinalIgnoreCase))
@@ -86,6 +82,7 @@ public sealed class PathGuard
             return Fail("目标路径超出你的授权目录");
         }
 
+        //软链接一律拒绝
         if (HasReparsePointEscape(root, full, out var linkReason))
             return Fail(linkReason);
 
@@ -94,10 +91,7 @@ public sealed class PathGuard
         return (true, "", full, relative);
     }
 
-    /// <summary>
-    /// 检查 root → target 之间是否存在 reparse point（软/硬链接、目录联接）。
-    /// 攻击者可先让 AI 在自己目录里创建一个指向 /etc 的链接，再通过"合法路径"读写白名单外的文件。
-    /// </summary>
+    //软链接必须解析
     private static bool HasReparsePointEscape(string root, string target, out string reason)
     {
         reason = "";
@@ -136,12 +130,13 @@ public sealed class PathGuard
         }
         catch
         {
-            // 属性读取失败时保守放行：后续仍会做"规范化后是否在白名单根之下"的判定
+            //读属性失败就放行
             return false;
         }
 
         return false;
     }
 
+    //返回失败
     private static (bool, string, string, string) Fail(string error) => (false, error, "", "");
 }
