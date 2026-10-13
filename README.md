@@ -4,6 +4,8 @@
 > 审计哈希链 + 快照回退 + 人工审批，AI 与发票 OCR 由协作方前端调用我们的接口完成。
 > 单进程、零第三方 NuGet 依赖、JSON 文件即数据库、开箱可跑的 .NET 8 实现。
 
+仓库地址：<https://github.com/xingyungames/agent-safe-gate>（仓库名 `agent-safe-gate` 指的就是这里的「AI Agent 安全执行与审批网关」）
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![.NET](https://img.shields.io/badge/.NET-8.0-512BD4.svg)](https://dotnet.microsoft.com/)
 [![Dependencies](https://img.shields.io/badge/NuGet-%E9%9B%B6%E7%AC%AC%E4%B8%89%E6%96%B9%E4%BE%9D%E8%B5%96-brightgreen.svg)](#技术选型)
@@ -19,7 +21,7 @@
 | 越权（员工想看别人的报销单、财务想删单） | 四角色权限矩阵 + 数据边界（员工按登录身份姓名过滤，详情再做一次归属校验），服务端强制 |
 | 前端或 AI 绕过规则写脏数据 | **报销单只有一个写入口**：枚举白名单、金额区间、状态流转、只读字段全部在服务端校验与盖章 |
 | "看起来正常的写入"投毒（脚本、外链、内网地址） | 后缀 ∪ 内容双通道识别可执行文件 + 片段级内容风险扫描，命中即强制人工审批 |
-| 机密泄露（口令、凭证） | 口令 PBKDF2 210k + 随机盐、只收紧不可逆；飞书凭证只从 `config/secrets.local.json` 读，绝不入库入仓 |
+| 机密泄露（口令、凭证） | 口令用"每账号随机盐 + 服务端密钥 + 120 万次慢哈希"存储，拖走 `users.json` 也无法离线爆破；飞书凭证与 AI 密钥只从 `config/secrets.local.json` / 环境变量读，绝不入库入仓 |
 | 飞书用户表被整表拖库 | 镜像只写**演示口令**的哈希，真实口令永不出本机；镜像失败静默处理，不影响账号功能 |
 | 高危操作点错一次就回不去 | 每次写飞书前存整行快照 + 撤销日志，管理员可按日志一键回退（新建→删除、删除→重建、修改→写回旧值） |
 | 事后说不清谁干了什么 | 审计 JSONL 哈希链（`Seq + PrevHash → SHA-256`），支持整链校验与篡改定位 |
@@ -31,7 +33,7 @@
 
 ## 核心特性
 
-- **账号权威 + 飞书镜像**：账号存在本机 `users.json`（PBKDF2 210k 口令哈希、令牌世代、工号），
+- **账号权威 + 飞书镜像**：账号存在本机 `users.json`（加盐 + 服务端密钥的慢哈希、令牌世代、工号），
   同时 best-effort 镜像到飞书用户表；镜像失败只写审计与状态，**注册、登录、改角色都不受影响**。
 - **初始超管与账号同步**：全新部署用 `Bootstrap:Admin`（环境变量 `AISERVER_BOOTSTRAP_*` 或 `config/secrets.local.json` 的 `BootstrapAdmin` 段）播种第一个超级管理员，
   推荐只填 `PasswordHash` + `PasswordSalt`，只在账号不存在时创建一次、不写飞书用户表；
@@ -73,8 +75,8 @@
 前置：**.NET 8 SDK**（无需任何第三方包）、可选 **Node.js 18+**（只用于跑测试脚本）。
 
 ```bash
-git clone https://github.com/xingyungames/AIServer.git
-cd AIServer/AiApprovalServer
+git clone https://github.com/xingyungames/agent-safe-gate.git
+cd agent-safe-gate/AiApprovalServer
 dotnet run
 ```
 
@@ -86,7 +88,7 @@ dotnet run
 | 财务工作台 | http://127.0.0.1:8899/finance | 单据列表与筛选、审核、修改、删除（按权限可见） |
 | 管理后台 | http://127.0.0.1:8899/admin | 账号与权限管理、审批、按日志回退、审计校验、安全态势、飞书账号同步 |
 
-首次启动会自动生成服务端密钥到 `App_Data/secrets.json`，并播种四个演示账号（工号按顺序分配）：
+首次启动会自动生成服务端密钥到 `App_Data/secrets.json`，并播种四个演示账号与一个初始超级管理员（工号按顺序分配）：
 
 | 账号 | 口令 | 角色 | 工号 |
 | --- | --- | --- | --- |
@@ -171,7 +173,7 @@ dotnet run
 ## 目录结构
 
 ```
-AIServer/
+agent-safe-gate/
 ├── README.md                    本文件
 ├── LICENSE                      MIT
 ├── SECURITY.md                  安全策略与漏洞报告方式
@@ -199,7 +201,7 @@ AIServer/
 全部套件都用 Node 编写，**无需安装依赖**，配合仓库自带的假模型与假飞书即可完全离线运行：
 
 ```bash
-cd AIServer
+cd agent-safe-gate
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-all.ps1   # 一键跑完全部套件（各自独立端口与数据根，推荐）
 
 # 也可以单跑某个套件（另开终端起假服务）
@@ -228,7 +230,7 @@ node tests/frontend-check.mjs AiApprovalServer/wwwroot                    # 前�
 ## 技术选型
 
 - **ASP.NET Core 8 最小 API**，单进程、单可执行文件。
-- **零第三方 NuGet 依赖**：JWT（HMAC-SHA256 自实现紧凑序列化）、PBKDF2-HMAC-SHA256（21 万次迭代 + 随机盐）、AES-256-GCM、`System.Text.Json` —— 依赖越少，可审计面越小。
+- **零第三方 NuGet 依赖**：JWT（HMAC-SHA256 自实现紧凑序列化）、PBKDF2-HMAC-SHA256（默认 120 万次迭代 + 每账号随机盐 + 服务端密钥）、AES-256-GCM、`System.Text.Json` —— 依赖越少，可审计面越小。
 - **JSON 文件即数据库**：原子写（临时文件 + 替换）+ `.bak` 备份 + 独占文件锁；审计链支持多实例并发追加（写前重读尾部校准链头）。
 - **前端零依赖**：原生 JS + `textContent`，不使用 `innerHTML`/`eval`，与严格 CSP 兼容。
 

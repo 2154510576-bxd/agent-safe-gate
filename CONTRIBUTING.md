@@ -10,8 +10,8 @@
 - Node.js 18+（仅用于跑 `tests/` 下的验收脚本，脚本本身也无依赖）
 
 ```bash
-git clone https://github.com/your-account/AIServer.git
-cd AIServer/AiApprovalServer
+git clone https://github.com/xingyungames/agent-safe-gate.git
+cd agent-safe-gate/AiApprovalServer
 dotnet build          # 期望 0 warning 0 error
 dotnet run            # 默认 http://127.0.0.1:8899
 ```
@@ -33,7 +33,10 @@ dotnet run            # 默认 http://127.0.0.1:8899
 
 - **C#**：文件级命名空间、4 空格、可空引用开启；新增公共类型放在合适的 `Core/ Tools/ Ai/ Services/ Api/ Security/` 目录下。
 - **前端**：原生 JS，只用 `textContent` 拼内容，**禁止** `innerHTML` / `eval` / 内联事件属性，以兼容严格 CSP；界面文案用中文，**不使用 emoji**。
-- **注释与文档**：中文。注释解释"为什么这样做"，而不是复述代码在做什么。
+- **注释**：中文，**只写一行短句说明这段代码做什么**（例如 `//登录判断`、`//写审计`），或临时说明（`//这里换成镜像`）。
+  不写"为什么这样做 / 不这样做会怎样"的长段解释，不用 `/// ` XML 文档注释，不用装饰性分隔线，注释里不写序号、不放 emoji。
+  背景、取舍与后果写在 `docs/` 的文档里，代码里只留最短的一句。协作方 `xiaocainu/` 的 Python 代码遵循同一约定。
+  这几条也记在 [docs/代码规范.md](docs/代码规范.md) 里。
 - **不引入第三方依赖**：这是本项目的核心特征（缩小可审计面）。确有必要的，请在 PR 里说明替代方案与安全影响。
 
 ---

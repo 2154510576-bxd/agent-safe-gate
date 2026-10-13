@@ -9,7 +9,7 @@
     <!-- 关闭全局化以缩小运行时依赖，本服务只输出/解析 UTF-8 与固定数字格式 -->
     <InvariantGlobalization>true</InvariantGlobalization>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
-    <!-- 开源仓库元信息；上传前把 RepositoryUrl 换成你的真实仓库地址 -->
+    <!-- 开源仓库元信息 -->
     <Version>1.0.0</Version>
     <Authors>星涵</Authors>
     <Company>星云游</Company>
@@ -17,7 +17,8 @@
     <Description>企业级 AI Agent 安全执行与审批系统：规则引擎硬拦截 + AI 安全审核物理隔离 + 人工审批 + 快照回退 + 审计哈希链</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryType>git</RepositoryType>
-    <RepositoryUrl>https://github.com/your-account/AIServer</RepositoryUrl>
+    <RepositoryUrl>https://github.com/xingyungames/agent-safe-gate</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/xingyungames/agent-safe-gate</PackageProjectUrl>
   </PropertyGroup>
 
   <!--
