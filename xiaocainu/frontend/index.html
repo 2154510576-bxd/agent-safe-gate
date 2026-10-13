@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>小财奴 · 企业财务报销助手</title>
+<style>
+  :root {
+    --blue-deep: #1e4e79;
+    --blue: #2c6cb0;
+    --blue-soft: #eaf2fb;
+    --amber: #e8a33d;
+    --amber-deep: #c8821f;
+    --ink: #20303f;
+    --muted: #6b7c8c;
+    --line: #dfe6ee;
+    --bg: #f5f8fc;
+    --ok: #2e9e5b;
+    --warn: #d9822b;
+    --bad: #cf4b4b;
+    --shadow: 0 8px 30px rgba(30,78,121,0.10);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    background: linear-gradient(180deg, #eef4fb 0%, var(--bg) 240px);
+    color: var(--ink);
+    display: flex; justify-content: center;
+  }
+  .app {
+    width: min(880px, 100%);
+    height: 100vh;
+    display: flex; flex-direction: column;
+    padding: 18px 18px 0;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 6px 4px 16px;
+  }
+  .logo {
+    width: 46px; height: 46px; border-radius: 12px;
+    background: linear-gradient(135deg, var(--blue) 0%, var(--blue-deep) 100%);
+    display: grid; place-items: center; color: #fff; font-size: 22px;
+    box-shadow: var(--shadow);
+  }
+  .title h1 { margin: 0; font-size: 20px; letter-spacing: .5px; }
+  .title p { margin: 3px 0 0; font-size: 12.5px; color: var(--muted); }
+  .spacer { flex: 1; }
+  .reset-btn {
+    border: 1px solid var(--line); background: #fff; color: var(--muted);
+    padding: 8px 14px; border-radius: 9px; cursor: pointer; font-size: 13px;
+    transition: .15s;
+  }
+  .reset-btn:hover { color: var(--blue); border-color: var(--blue); }
+
+  .chips { display: flex; gap: 9px; flex-wrap: wrap; padding: 0 4px 14px; }
+  .chip {
+    border: 1px solid var(--blue-soft); background: #fff; color: var(--blue);
+    padding: 7px 13px; border-radius: 999px; cursor: pointer; font-size: 13px;
+    transition: .15s; user-select: none;
+  }
+  .chip:hover { background: var(--blue); color: #fff; border-color: var(--blue); }
+
+  .window {
+    flex: 1; overflow-y: auto; padding: 6px 4px 14px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .msg { display: flex; gap: 10px; max-width: 86%; }
+  .msg.user { align-self: flex-end; flex-direction: row-reverse; }
+  .avatar {
+    width: 34px; height: 34px; border-radius: 10px; flex: 0 0 auto;
+    display: grid; place-items: center; font-size: 16px; color: #fff;
+  }
+  .msg.bot .avatar { background: linear-gradient(135deg, var(--blue) 0%, var(--blue-deep) 100%); }
+  .msg.user .avatar { background: linear-gradient(135deg, var(--amber) 0%, var(--amber-deep) 100%); }
+  .bubble {
+    background: #fff; border: 1px solid var(--line); border-radius: 14px;
+    padding: 11px 14px; font-size: 14.5px; line-height: 1.65;
+    white-space: pre-wrap; word-break: break-word; box-shadow: 0 2px 8px rgba(30,78,121,.05);
+  }
+  .msg.user .bubble { background: var(--blue-soft); border-color: #d3e3f5; }
+  .intent-badge {
+    display: inline-block; font-size: 11px; font-weight: 600;
+    padding: 1px 8px; border-radius: 6px; margin-bottom: 6px; color: #fff;
+  }
+  .i-A { background: var(--blue); }
+  .i-B { background: var(--amber-deep); }
+  .i-C { background: var(--ok); }
+  .i-D { background: #6a4fb0; }
+  .records { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 8px; }
+  .rec {
+    background: var(--blue-soft); border-radius: 9px; padding: 8px 11px;
+    font-size: 13px; line-height: 1.6; margin-top: 6px;
+  }
+  .typing { color: var(--muted); font-size: 13px; font-style: italic; }
+  .session-divider {
+    align-self: center; max-width: 92%;
+    font-size: 12px; color: var(--muted);
+    background: #fff; border: 1px dashed var(--line);
+    padding: 4px 14px; border-radius: 999px;
+    text-align: center;
+  }
+
+  .composer {
+    display: flex; gap: 10px; padding: 12px 4px 18px; align-items: flex-end;
+  }
+  .composer textarea {
+    flex: 1; resize: none; height: 50px; max-height: 140px;
+    border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+    font-size: 14.5px; font-family: inherit; color: var(--ink); outline: none;
+    transition: .15s;
+  }
+  .composer textarea:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+  .clip-btn {
+    height: 50px; width: 50px; border: 1px solid var(--line); border-radius: 12px;
+    background: #fff; cursor: pointer; font-size: 20px; transition: .15s;
+  }
+  .clip-btn:hover { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+  .clip-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .send-btn {
+    height: 50px; padding: 0 22px; border: none; border-radius: 12px; cursor: pointer;
+    background: linear-gradient(135deg, var(--blue) 0%, var(--blue-deep) 100%);
+    color: #fff; font-size: 15px; font-weight: 600; transition: .15s;
+  }
+  .send-btn:hover { opacity: .92; }
+  .send-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .foot { text-align: center; font-size: 11.5px; color: var(--muted); padding: 0 0 10px; }
+  .err { color: var(--bad); }
+
+  /* ---- M8 登录遮罩 + 用户徽标 ---- */
+  .login-mask {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(32,48,63,.45); backdrop-filter: blur(2px);
+    display: grid; place-items: center;
+  }
+  .login-mask.hidden { display: none; }
+  .login-card {
+    width: min(360px, 92vw); background: #fff; border-radius: 16px;
+    padding: 26px 26px 20px; box-shadow: var(--shadow);
+  }
+  .login-card h2 { margin: 0 0 4px; font-size: 19px; color: var(--blue-deep); }
+  .login-card .sub { margin: 0 0 14px; font-size: 12.5px; color: var(--muted); }
+  .login-card label { display: block; font-size: 12.5px; color: var(--muted); margin: 10px 0 4px; }
+  .login-card input {
+    width: 100%; border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px 12px; font-size: 14px; font-family: inherit; outline: none; transition: .15s;
+  }
+  .login-card input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px var(--blue-soft); }
+  .login-btn {
+    width: 100%; margin-top: 16px; height: 44px; border: none; border-radius: 10px;
+    background: linear-gradient(135deg, var(--blue) 0%, var(--blue-deep) 100%);
+    color: #fff; font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  .login-btn:disabled { opacity: .55; cursor: not-allowed; }
+  .login-err { color: var(--bad); font-size: 12.5px; margin-top: 10px; min-height: 16px; }
+  .user-badge { display: none; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+  .user-badge .who { color: var(--blue-deep); font-weight: 600; }
+  .logout-btn {
+    border: 1px solid var(--line); background: #fff; color: var(--muted);
+    padding: 6px 11px; border-radius: 8px; cursor: pointer; font-size: 12.5px; transition: .15s;
+  }
+  .logout-btn:hover { color: var(--bad); border-color: var(--bad); }
+</style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div class="logo">💰</div>
+      <div class="title">
+        <h1>小财奴</h1>
+        <p>企业财务报销助手 · 政策咨询 / 填单引导 / 合规预审 / 进度查询</p>
+      </div>
+      <div class="spacer"></div>
+      <div class="user-badge" id="userBadge">
+        <span class="who" id="whoAmI"></span>
+        <button class="logout-btn" id="logoutBtn">退出</button>
+      </div>
+      <button class="reset-btn" id="resetBtn" title="清空本轮对话">↺ 新对话</button>
+    </header>
+
+    <div class="chips" id="chips">
+      <span class="chip" data-chip="consult">💡 政策咨询</span>
+      <span class="chip" data-chip="fill">📝 填单引导</span>
+      <span class="chip" data-chip="pre">🛡️ 合规预审</span>
+      <span class="chip" data-chip="progress">🔎 进度查询</span>
+    </div>
+
+    <div class="window" id="window"></div>
+
+    <div class="composer">
+      <button class="clip-btn" id="clipBtn" title="上传发票图片，AI 自动识别金额/日期/发票号">📎</button>
+      <input type="file" id="invoiceFile" accept="image/jpeg,image/png,image/webp" style="display:none" />
+      <textarea id="input" placeholder="例如：我要报销，张三，研发部，招待费 800 有发票" rows="1"></textarea>
+      <button class="send-btn" id="sendBtn">发送</button>
+    </div>
+    <div class="foot">会话仅驻留内存（不落库）· 登录令牌仅存本页 sessionStorage · 凭证仅存于服务端，本页面不接触任何密钥 · 发票图仅内存中转，随单存入贵司飞书表</div>
+  </div>
+
+  <!-- M8 登录遮罩：未登录/登录过期时挡住主界面（fail-closed，与网关 401 对应） -->
+  <div class="login-mask" id="loginMask">
+    <form class="login-card" id="loginForm">
+      <h2>🔐 登录小财奴</h2>
+      <p class="sub">账号由管理员创建（角色：员工 / 财务 / 管理员）</p>
+      <label for="loginUser">用户名</label>
+      <input id="loginUser" autocomplete="username" placeholder="如 zhangsan" />
+      <label for="loginPwd">密码</label>
+      <input id="loginPwd" type="password" autocomplete="current-password" placeholder="••••••••" />
+      <button class="login-btn" id="loginBtn" type="submit">登 录</button>
+      <div class="login-err" id="loginErr"></div>
+    </form>
+  </div>
+
+<script>
+  // ---------- 内存级会话（不持久化，刷新/新对话即清空） ----------
+  let sessionId = "web-" + Math.random().toString(36).slice(2, 12);
+  let pendingInvoice = null;  // M9 暂存发票 {b64,mime,filename,invoice_no,invoice_seller}，随对话请求捎带，提交成功即清
+  const windowEl = document.getElementById("window");
+  const inputEl = document.getElementById("input");
+  const sendBtn = document.getElementById("sendBtn");
+
+  // ---------- M8 登录态（token 仅存 sessionStorage：刷新不掉线、关标签即清） ----------
+  const loginMask = document.getElementById("loginMask");
+  const loginForm = document.getElementById("loginForm");
+  const loginUserEl = document.getElementById("loginUser");
+  const loginPwdEl = document.getElementById("loginPwd");
+  const loginBtnEl = document.getElementById("loginBtn");
+  const loginErrEl = document.getElementById("loginErr");
+  const userBadge = document.getElementById("userBadge");
+  const whoAmI = document.getElementById("whoAmI");
+  let authToken = sessionStorage.getItem("xc_token") || "";
+  let currentUser = null;
+  try { currentUser = JSON.parse(sessionStorage.getItem("xc_user") || "null"); } catch (e) { currentUser = null; }
+
+  function authHeaders() {
+    return authToken ? { "Authorization": "Bearer " + authToken } : {};
+  }
+
+  function applyAuthUI() {
+    if (currentUser) {
+      loginMask.classList.add("hidden");
+      userBadge.style.display = "flex";
+      whoAmI.textContent = (currentUser.姓名 || currentUser.用户名 || "?") + " · " + (currentUser.角色 || "");
+    } else {
+      loginMask.classList.remove("hidden");
+      userBadge.style.display = "none";
+      whoAmI.textContent = "";
+    }
+    // 🛡️ 合规预审按钮仅财务/管理员可见（UX 层；真正的权限在服务端强制）
+    const preChip = document.querySelector('[data-chip="pre"]');
+    const canPre = currentUser && (currentUser.角色 === "财务" || currentUser.角色 === "管理员");
+    if (preChip) preChip.style.display = canPre ? "" : "none";
+  }
+
+  function showLogin(message) {
+    loginErrEl.textContent = message || "";
+    loginMask.classList.remove("hidden");
+    userBadge.style.display = "none";
+    loginUserEl.focus();
+  }
+
+  function resetChatToWelcome() {
+    sessionId = "web-" + Math.random().toString(36).slice(2, 12);
+    pendingInvoice = null;  // M9：新对话丢弃暂存发票（内存即清，不残留）
+    windowEl.innerHTML = "";
+    addMessage("bot", WELCOME_HTML);
+  }
+
+  loginForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const username = loginUserEl.value.trim();
+    const password = loginPwdEl.value;
+    if (!username || !password) { loginErrEl.textContent = "请输入用户名和密码"; return; }
+    loginBtnEl.disabled = true;
+    loginErrEl.textContent = "";
+    try {
+      const resp = await fetch("/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok) {
+        authToken = data.token;
+        currentUser = data.user || null;
+        sessionStorage.setItem("xc_token", authToken);
+        sessionStorage.setItem("xc_user", JSON.stringify(currentUser));
+        if (data.session_id) sessionId = data.session_id;  // 切到服务端生成的新会话
+        loginPwdEl.value = "";
+        applyAuthUI();
+        resetChatToWelcome();
+        addMessage("bot", "✅ 登录成功，欢迎您，" + (currentUser && (currentUser.姓名 || currentUser.用户名) || "") + "！");
+      } else {
+        const msg = (data.detail && data.detail.error) || data.error || ("登录失败(" + resp.status + ")");
+        loginErrEl.textContent = msg;
+      }
+    } catch (err) {
+      loginErrEl.textContent = "网络异常，无法连接服务";
+    } finally {
+      loginBtnEl.disabled = false;
+    }
+  });
+
+  document.getElementById("logoutBtn").addEventListener("click", async () => {
+    // 登出：通知服务端拉黑 token（尽力而为），本地立即失效
+    try { await fetch("/logout", { method: "POST", headers: authHeaders() }); } catch (e) {}
+    authToken = "";
+    currentUser = null;
+    sessionStorage.removeItem("xc_token");
+    sessionStorage.removeItem("xc_user");
+    applyAuthUI();
+    resetChatToWelcome();
+  });
+
+  const INTENT_LABEL = { A: "政策咨询", B: "填单引导", C: "合规预审", D: "进度查询" };
+
+  // 欢迎语（初始渲染与「↺ 新对话」清空后共用同一份，改这里即可）
+  const WELCOME_HTML = "您好呀~ 我是小财奴 📒 可以帮您：<br>"
+    + "· 咨询报销制度（直接问我政策）<br>"
+    + "· 引导填写报销单（说「填单引导」看全参数说明）<br>"
+    + "· 提交前做合规预审（说「帮我预审 xxx」）<br>"
+    + "· 查询报销进度（说「查一下我的报销」）<br>"
+    + "点上方快捷按钮试试：咨询/预审会帮您把问题填进输入框（可改再发），填单/进度直接演示；再点同一个按钮会换下一个示例哦 👇";
+
+  function scrollBottom() { windowEl.scrollTop = windowEl.scrollHeight; }
+
+  function addMessage(role, html) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg " + role;
+    const avatar = document.createElement("div");
+    avatar.className = "avatar";
+    avatar.textContent = role === "bot" ? "💰" : "🙂";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+    bubble.innerHTML = html;
+    wrap.appendChild(avatar);
+    wrap.appendChild(bubble);
+    windowEl.appendChild(wrap);
+    scrollBottom();
+    return bubble;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    }[c]));
+  }
+
+  function renderBot(res) {
+    const intent = res.intent || "";
+    const label = INTENT_LABEL[intent] || intent;
+    let html = "";
+    if (intent) {
+      html += `<span class="intent-badge i-${intent}">${label}</span><br>`;
+    }
+    const answer = res.answer || "（无返回内容）";
+    html += escapeHtml(answer).replace(/\n/g, "<br>");
+    // D 分支：额外渲染结构化记录（全字段展示，空值显示「无」）
+    if (res.intent === "D" && Array.isArray(res.records) && res.records.length) {
+      const na = (v) => { const s = (v ?? "").toString().trim(); return s ? s : "无"; };
+      const fmtTs = (v) => {
+        const n = Number(v);
+        if (!v || Number.isNaN(n) || n <= 0) return na(v);
+        const d = new Date(n);
+        return isNaN(d) ? na(v)
+          : `${d.getFullYear()}/${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      };
+      const fmtAtt = (v) => Array.isArray(v) && v.length
+        ? v.map((it) => (it && it.name) ? it.name : "附件").join("、")
+        : na(v);
+      html += `<div class="records">`;
+      res.records.forEach((m) => {
+        const amt = (m["金额"] ?? "") !== "" ? `¥${m["金额"]}` : "无";
+        html += `<div class="rec">📋 单号 ${escapeHtml(na(m["单号"]))}<br>`
+              + `👤 申请人：${escapeHtml(na(m["申请人"]))} · 部门：${escapeHtml(na(m["部门"]))} · 工号：${escapeHtml(na(m["工号"]))}<br>`
+              + `💼 类型：${escapeHtml(na(m["报销类型"]))} · 金额：${escapeHtml(amt)}<br>`
+              + `📝 事由：${escapeHtml(na(m["事由"]))}<br>`
+              + `🕐 提交：${escapeHtml(fmtTs(m["记录提交时间"]))} · 发票日期：${escapeHtml(fmtTs(m["发票日期"]))}<br>`
+              + `🧾 票据：${escapeHtml(na(m["票据状态"]))} · 发票信息：${escapeHtml(na(m["发票信息"]))} · 附件：${escapeHtml(fmtAtt(m["发票附件"]))}<br>`
+              + `📊 ${escapeHtml(na(m["状态"]))} · 合规：${escapeHtml(na(m["合规结果"]))}<br>`
+              + `👮 审核人：${escapeHtml(na(m["审核人"]))} · 审批意见：${escapeHtml(na(m["审批意见"]))} · 审批时间：${escapeHtml(fmtTs(m["审批时间"]))}`
+              + `</div>`;
+      });
+      html += `</div>`;
+    }
+    addMessage("bot", html);
+  }
+
+  function setBusy(busy) {
+    sendBtn.disabled = busy;
+    inputEl.disabled = busy;
+  }
+
+  async function send(text) {
+    text = (text || "").trim();
+    if (!text) return;
+    if (freshNextSend) { freshNextSend = false; newSession(); }  // 预填示例真正发出时才开新会话
+    addMessage("user", escapeHtml(text).replace(/\n/g, "<br>"));
+    inputEl.value = "";
+    setBusy(true);
+    const typing = addMessage("bot", '<span class="typing">小财奴正在思考…</span>');
+
+    try {
+      const payload = { session_id: sessionId, text };
+      // M9：有暂存发票则随请求捎带（图片 + OCR 字段），服务端过图片防线后进入 agent
+      if (pendingInvoice) {
+        payload.image_b64 = pendingInvoice.b64;
+        payload.image_mime = pendingInvoice.mime;
+        payload.invoice_no = pendingInvoice.invoice_no || "";
+        payload.invoice_seller = pendingInvoice.invoice_seller || "";
+      }
+      const resp = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify(payload)
+      });
+      const data = await resp.json().catch(() => ({}));
+      // 移除「正在输入」
+      if (typing && typing.parentNode) typing.parentNode.remove();
+      if (resp.ok) {
+        renderBot(data);
+        // M9：单据提交成功（拿到 record_id）→ 暂存发票已完成使命，内存即清
+        if (data.record_id) pendingInvoice = null;
+      } else if (resp.status === 401) {
+        // 登录过期/未登录：弹出登录遮罩（fail-closed，与网关认证墙对应）
+        authToken = "";
+        currentUser = null;
+        sessionStorage.removeItem("xc_token");
+        sessionStorage.removeItem("xc_user");
+        applyAuthUI();
+        showLogin("登录已过期，请重新登录");
+      } else if (resp.status === 429) {
+        addMessage("bot", '<span class="err">⏳ 操作有点频繁啦，请稍后再试~</span>');
+      } else if (resp.status === 422) {
+        addMessage("bot", '<span class="err">⚠️ 输入过长或格式有误，请精简后重试。</span>');
+      } else {
+        const msg = data && (data.detail && data.detail.error || data.error) || ("服务异常(" + resp.status + ")");
+        addMessage("bot", `<span class="err">⚠️ ${escapeHtml(msg)}</span>`);
+      }
+    } catch (e) {
+      if (typing && typing.parentNode) typing.parentNode.remove();
+      addMessage("bot", '<span class="err">⚠️ 网络异常，无法连接服务，请确认网关已启动。</span>');
+    } finally {
+      setBusy(false);
+      inputEl.focus();
+    }
+  }
+
+  sendBtn.addEventListener("click", () => send(inputEl.value));
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(inputEl.value); }
+  });
+  // 自动撑高文本框
+  inputEl.addEventListener("input", () => {
+    inputEl.style.height = "50px";
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + "px";
+  });
+
+  // ---------- M9 发票上传 OCR：📎 → /ocr 识别 → 结果卡片 → preview 预填草稿 ----------
+  const clipBtn = document.getElementById("clipBtn");
+  const invoiceFile = document.getElementById("invoiceFile");
+
+  function renderOcrCard(d) {
+    const f = (d && d.fields) || {};
+    const rows = [
+      ["💰 金额", f.amount != null && f.amount !== "" ? "¥" + f.amount : "未识别（请补充）"],
+      ["📅 开票日期", f.invoice_date || "未识别"],
+      ["🔢 发票号码", f.invoice_no || "-"],
+      ["🏢 销售方", f.seller || "-"],
+      ["💼 类型建议", f.rtype || "-"],
+      ["📍 城市", f.city || "-"],
+    ];
+    let html = '<span class="intent-badge i-B">🧾 发票识别完成</span><br>';
+    if (Array.isArray(d.warnings) && d.warnings.length) {
+      html += '<span class="err">⚠️ ' + escapeHtml(d.warnings.join("；")) + "</span><br>";
+    }
+    html += '<div class="records"><div class="rec">';
+    rows.forEach(([k, v]) => { html += escapeHtml(k) + "：" + escapeHtml(String(v)) + "<br>"; });
+    html += "</div></div>";
+    html += "🤖 识别引擎：" + escapeHtml(d.model || "-") + " · 已自动预填，缺啥补啥，没问题回「确认提交」~";
+    return html;
+  }
+
+  async function ocrInvoice(file) {
+    if (!file) return;
+    if (!authToken) { showLogin("请先登录后再上传发票"); return; }
+    if (file.size > 8 * 1024 * 1024) {
+      addMessage("bot", '<span class="err">⚠️ 图片超过 8MB，请压缩或拍照后重试。</span>');
+      return;
+    }
+    addMessage("user", "📎 上传发票：" + escapeHtml(file.name));
+    // FileReader → data URL → 剥前缀取裸 base64（图片仅内存中转，不落本地）
+    const b64 = await new Promise((resolve) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result).split(",")[1] || "");
+      r.onerror = () => resolve("");
+      r.readAsDataURL(file);
+    });
+    if (!b64) { addMessage("bot", '<span class="err">⚠️ 图片读取失败，请换一张试试。</span>'); return; }
+    setBusy(true);
+    const typing = addMessage("bot", '<span class="typing">正在识别发票…</span>');
+    try {
+      const resp = await fetch("/ocr", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({ session_id: sessionId, image_b64: b64, filename: file.name })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (typing && typing.parentNode) typing.parentNode.remove();
+      if (resp.ok && data.ok) {
+        pendingInvoice = {
+          b64: b64,
+          mime: data.mime || file.type || "image/jpeg",
+          filename: file.name,
+          invoice_no: (data.fields && data.fields.invoice_no) || "",
+          invoice_seller: (data.fields && data.fields.seller) || "",
+        };
+        addMessage("bot", renderOcrCard(data));
+        if (data.preview) await send(data.preview);  // 一句话预填 → B 分支自动合并追问
+      } else if (resp.status === 401) {
+        authToken = ""; currentUser = null;
+        sessionStorage.removeItem("xc_token"); sessionStorage.removeItem("xc_user");
+        applyAuthUI(); showLogin("登录已过期，请重新登录");
+      } else if (resp.status === 429) {
+        addMessage("bot", '<span class="err">⏳ 识别有点频繁啦，请稍后再试~</span>');
+      } else if (resp.status === 413) {
+        addMessage("bot", '<span class="err">⚠️ 图片太大，请压缩到 8MB 以内。</span>');
+      } else {
+        const msg = data && (data.detail && data.detail.error || data.error) || ("识别失败(" + resp.status + ")");
+        addMessage("bot", `<span class="err">⚠️ ${escapeHtml(msg)}</span>`);
+      }
+    } catch (e) {
+      if (typing && typing.parentNode) typing.parentNode.remove();
+      addMessage("bot", '<span class="err">⚠️ 网络异常，无法连接服务，请确认网关已启动。</span>');
+    } finally {
+      setBusy(false);
+      inputEl.focus();
+    }
+  }
+
+  clipBtn.addEventListener("click", () => invoiceFile.click());
+  invoiceFile.addEventListener("change", () => {
+    const f = invoiceFile.files && invoiceFile.files[0];
+    invoiceFile.value = "";  // 允许重复选同一张
+    if (f) ocrInvoice(f);
+  });
+
+  // ---------- 快捷按钮：每个按钮一组示例，每点一次自动发送下一个（新开一轮对话，互不混淆） ----------
+  const CHIP_FLOW = {
+    consult: {   // 💡 政策咨询：4 个示例轮着来
+      examples: [
+        "差旅费住宿标准是多少？",
+        "招待费报销需要提供哪些材料？",
+        "发票抬头开错了还能报销吗？",
+        "报销有没有时间限制？",
+      ],
+    },
+    fill: {      // 📝 填单引导：固定口令，后端输出全参数友好引导
+      examples: ["填单引导"],
+    },
+    pre: {       // 🛡️ 合规预审：4 个示例轮着来（通过 / 超标 / 无票阻断 / 超时，各演示一种结果）
+      examples: [
+        "帮我预审：交通费 200 元 有发票",
+        "帮我预审一下：招待费 3000 元，有发票",
+        "帮我预审：办公用品 6000 元 没发票",
+        "帮我预审一下，8月10号的差旅费 2600 元 北京 有发票",
+      ],
+    },
+    progress: {  // 🔎 进度查询：固定一句话，机器人会接着引导输入姓名
+      examples: ["查询一下我的报销进度"],
+    },
+  };
+  const chipIndex = { consult: 0, fill: 0, pre: 0, progress: 0 };
+  // 咨询/预审按钮只预填输入框；标记「下次发送前先开新会话」，真正发出去时才与上一段对话隔离
+  let freshNextSend = false;
+
+  function addDivider(text) {
+    const d = document.createElement("div");
+    d.className = "session-divider";
+    d.textContent = text;   // textContent，不用 innerHTML（CSP 友好）
+    windowEl.appendChild(d);
+    scrollBottom();
+  }
+
+  function newSession() {
+    // 换新会话只插入分隔标记，不清屏：上一轮记录保留，可随时上滑查看
+    sessionId = "web-" + Math.random().toString(36).slice(2, 12);
+    addDivider("— 新对话已开启 ✨ 上方是之前的记录，可上滑查看 —");
+  }
+
+  document.getElementById("chips").addEventListener("click", (e) => {
+    const chip = e.target.closest(".chip");
+    if (!chip) return;
+    const key = chip.getAttribute("data-chip");
+    const flow = CHIP_FLOW[key];
+    if (!flow) return;
+    const i = chipIndex[key] % flow.examples.length;
+    chipIndex[key] = i + 1;
+    const text = flow.examples[i];
+    if (key === "consult" || key === "pre") {
+      // 💡 政策咨询 / 🛡️ 合规预审：示例填进输入框，由您确认后手动发送（再点同按钮换下一个示例）
+      inputEl.value = text;
+      inputEl.focus();
+      inputEl.dispatchEvent(new Event("input"));
+      freshNextSend = true;
+    } else {
+      // 📝 填单引导 / 🔎 进度查询：保持点击直接演示
+      freshNextSend = false;
+      newSession();
+      send(text);
+    }
+  });
+
+  document.getElementById("resetBtn").addEventListener("click", () => {
+    // 「↺ 新对话」：真正清空聊天记录，回到全新欢迎页（与快捷按钮的"保留历史+分隔线"不同）
+    freshNextSend = false;
+    sessionId = "web-" + Math.random().toString(36).slice(2, 12);
+    windowEl.innerHTML = "";
+    addMessage("bot", WELCOME_HTML);
+  });
+
+  // 初始渲染欢迎语 + 应用登录态（有 token 直接进主界面，无 token 弹登录遮罩）
+  addMessage("bot", WELCOME_HTML);
+  applyAuthUI();
+
+  inputEl.focus();
+</script>
+</body>
+</html>
