@@ -28,6 +28,12 @@ public static class InvoicePolicy
     //只读列：单号与附件
     public static readonly string[] ReadOnlyFields = { FieldBillNo, FieldInvoiceFile };
 
+    //日期列：飞书只接受毫秒时间戳，空值不能写成空串或 null
+    public static readonly string[] DateFields = { FieldInvoiceDate, FieldSubmittedAt, FieldReviewedAt };
+
+    //飞书读取时会略过空列，回退时这些列若不在快照里就说明当时是空的，要按空值写回
+    public static readonly string[] ClearWhenAbsentFields = { FieldReviewer, FieldReviewOpinion };
+
     //服务端盖章的列
     public static readonly string[] ServerStampedFields =
         { FieldApplicant, FieldEmployeeId, FieldSubmittedAt, FieldCompliance, FieldRiskSummary, FieldStatus };

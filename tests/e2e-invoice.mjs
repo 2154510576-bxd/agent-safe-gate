@@ -163,6 +163,61 @@ const reviewBySecond = await call('POST', '/api/invoice/review', {
 });
 check('员工无权审批他人单据（403）', reviewBySecond.status === 403, `status=${reviewBySecond.status}`);
 
+//回退审核：把快照写回飞书时必须还原成真实类型
+//（历史缺陷：快照里每个字段存的是 JSON 文本，回退时直接写回会变成带引号的字符串与字符串日期，
+//  飞书侧报 DatetimeFieldConvFail / WrongRequestBody，管理后台看到的是一次看不懂的失败）
+async function mockRow(recordId) {
+  const res = await fetch(MOCK + '/__mock/state');
+  const state = await res.json();
+  for (const rows of Object.values(state.data?.tables || {})) {
+    const hit = rows.find(r => r.record_id === recordId);
+    if (hit) return hit.fields;
+  }
+  return null;
+}
+
+const rbTarget = await call('POST', '/api/invoice/submit', {
+  token: emp.token, signKey: emp.signKey,
+  body: {
+    department: '研发部', rtype: '交通费', amount: 777, reason: '回退审核用单',
+    hasInvoice: '有票', invoiceDate: '2026-10-05',
+  },
+});
+check('准备：提交一张用于审核回退的单', rbTarget.status === 200 && !!rbTarget.body?.data?.recordId, `status=${rbTarget.status}`);
+const rbRecord = rbTarget.body?.data?.recordId;
+
+const rbReview = await call('POST', '/api/invoice/review', {
+  token: fin.token, signKey: fin.signKey,
+  body: { recordId: rbRecord, status: '已通过', opinion: '先通过再回退' },
+});
+check('准备：财务审核通过（产生 review 版本）', rbReview.status === 200, `status=${rbReview.status} msg=${rbReview.body?.message}`);
+
+const rbList = await call('GET', '/api/admin/versions?limit=100', { token: adm.token });
+const rbVersions = rbList.body?.data?.versions || rbList.body?.data || [];
+const reviewVersion = rbVersions.find(v => v.operation === 'review' && (v.target || '').includes(rbRecord));
+check('准备：找到该单的 review 版本', !!reviewVersion, JSON.stringify(rbVersions.slice(0, 5).map(v => ({ op: v.operation, target: v.target }))));
+
+if (reviewVersion) {
+  const rbReviewBack = await call('POST', '/api/invoice/rollback', {
+    token: adm.token, signKey: adm.signKey, body: { versionId: reviewVersion.id },
+  });
+  check('回退审核成功（不再报飞书字段类型错误）', rbReviewBack.status === 200,
+    `status=${rbReviewBack.status} msg=${rbReviewBack.body?.message}`);
+
+  const after = await mockRow(rbRecord);
+  check('回退后能读到飞书行', !!after, JSON.stringify(after));
+  check('回退写回的文本没有多余引号', after?.事由 === '回退审核用单', JSON.stringify(after?.事由));
+  check('回退写回的数字仍是数字类型', typeof after?.金额 === 'number' && after.金额 === 777, JSON.stringify(after?.金额));
+  check('回退写回的日期列是毫秒数字（飞书只认这个）', typeof after?.发票日期 === 'number' && after.发票日期 > 0, JSON.stringify(after?.发票日期));
+  check('回退后状态回到审核前（待审核）', after?.状态 === '待审核', JSON.stringify(after?.状态));
+  check('回退后审批意见已清空', (after?.审批意见 ?? '') === '', JSON.stringify(after?.审批意见));
+
+  const rbReviewAgain = await call('POST', '/api/invoice/rollback', {
+    token: adm.token, signKey: adm.signKey, body: { versionId: reviewVersion.id },
+  });
+  check('同一 review 版本不可重复回退', rbReviewAgain.status === 400, `status=${rbReviewAgain.status}`);
+}
+
 const verify = await call('GET', '/api/admin/audit/verify', { token: adm.token });
 check('审计哈希链完整', verify.body?.data?.ok === true, JSON.stringify(verify.body?.data));
 

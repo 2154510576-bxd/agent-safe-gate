@@ -393,6 +393,7 @@ public sealed class InvoiceService
                     //删除的回退即按快照重建
                     var fields = ReadSnapshotFields(undo);
                     if (fields.Count == 0) return InvoiceResult.Fail("快照为空，无法重建");
+                    fields = SanitizeForFeishu(fields);
                     fields = await FitAsync(fields, ct).ConfigureAwait(false);
                     var newId = await _api.CreateRecordAsync(_cfg.Feishu.TableId, fields, ct).ConfigureAwait(false);
                     if (string.IsNullOrEmpty(newId)) return InvoiceResult.Fail("重建失败：飞书未返回 record_id");
@@ -425,9 +426,12 @@ public sealed class InvoiceService
                                  .Concat(new[] { InvoicePolicy.FieldStatus, InvoicePolicy.FieldReviewer, InvoicePolicy.FieldReviewOpinion }))
                     {
                         if (oldFields.TryGetValue(name, out var v))
-                            restore[name] = JsonToValue(v);
+                            restore[name] = UnwrapSnapshotValue(v);
+                        else if (InvoicePolicy.ClearWhenAbsentFields.Contains(name))
+                            restore[name] = "";   //快照里没有 = 当时就是空的，回退要把它清掉
                     }
                     if (restore.Count == 0) return InvoiceResult.Fail("快照中没有可恢复的字段");
+                    restore = SanitizeForFeishu(restore);
                     restore = await FitAsync(restore, ct).ConfigureAwait(false);
                     await _api.UpdateRecordAsync(_cfg.Feishu.TableId, recordId, restore, ct).ConfigureAwait(false);
                     break;
@@ -525,18 +529,28 @@ public sealed class InvoiceService
         if (node.ValueKind == JsonValueKind.Object)
         {
             foreach (var p in node.EnumerateObject())
-            {
-                //快照存的是字段与 JSON 文本，优先按文本解析回原始类型
-                if (p.Value.ValueKind == JsonValueKind.String)
-                {
-                    var raw = p.Value.GetString() ?? "";
-                    result[p.Name] = TryParseJsonValue(raw) ?? raw;
-                }
-                else
-                {
-                    result[p.Name] = JsonToValue(p.Value);
-                }
-            }
+                result[p.Name] = UnwrapSnapshotValue(p.Value);
+        }
+        return result;
+    }
+
+    //快照里每个字段存的都是 JSON 文本，这里还原成真实类型
+    private static object? UnwrapSnapshotValue(JsonElement v)
+    {
+        if (v.ValueKind != JsonValueKind.String) return JsonToValue(v);
+        var raw = v.GetString() ?? "";
+        return TryParseJsonValue(raw) ?? raw;
+    }
+
+    //日期列不接受空串与 null，其余空串保留（表示清空）
+    private static Dictionary<string, object?> SanitizeForFeishu(Dictionary<string, object?> fields)
+    {
+        var result = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var (name, value) in fields)
+        {
+            if (value is null) continue;
+            if (value is string text && text.Length == 0 && InvoicePolicy.DateFields.Contains(name)) continue;
+            result[name] = value;
         }
         return result;
     }
