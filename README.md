@@ -73,7 +73,7 @@
 前置：**.NET 8 SDK**（无需任何第三方包）、可选 **Node.js 18+**（只用于跑测试脚本）。
 
 ```bash
-git clone https://github.com/your-account/AIServer.git
+git clone https://github.com/xingyungames/AIServer.git
 cd AIServer/AiApprovalServer
 dotnet run
 ```
