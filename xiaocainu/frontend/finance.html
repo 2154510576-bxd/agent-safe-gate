@@ -260,13 +260,13 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
   <!-- 主工作台（登录且角色为财务/管理员时显示） -->
   <div class="app" id="appView" style="display:none">
     <header>
-      <div class="logo">🛡️</div>
+      <div class="logo"></div>
       <div class="title">
         <h1>小财奴 · 财务审核台</h1>
         <p>报销单据审核 / 修改 / 删除 —— 直接写入飞书多维表格，操作即刻生效</p>
       </div>
       <div class="spacer"></div>
-      <span class="head-link" id="chatHint" title="财务/管理员不提供填单入口，避免自审自批">🔒 业务工作台仅限员工角色</span>
+      <span class="head-link" id="chatHint" title="财务/管理员不提供填单入口，避免自审自批"> 业务工作台仅限员工角色</span>
       <div class="user-badge" id="userBadge">
         <span class="who" id="whoAmI"></span>
         <button class="logout-btn" id="logoutBtn">退出</button>
@@ -274,7 +274,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
     </header>
 
     <div class="banner">
-      🔒 操作提示：本页面的审核、修改、删除会<b>直接写入真实飞书多维表格</b>，员工随即能在聊天页查到最新状态。
+       操作提示：本页面的审核、修改、删除会<b>直接写入真实飞书多维表格</b>，员工随即能在聊天页查到最新状态。
       <b>删除为物理删除、不可恢复</b>（操作前请核对单号与申请人，删除理由必填）；
       动作审计与版本回溯由安全审计服务按操作日志负责，本页不提供回退入口。财务与管理员均可执行删除。
     </div>
@@ -282,7 +282,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
     <!-- 顶部规则条：横跨全宽（横排标签，不再窄栏竖排） -->
     <section class="card rules-card" id="metaCard">
       <div class="rules-head">
-        <h3>📐 审核规则与字段口径</h3>
+        <h3> 审核规则与字段口径</h3>
         <span class="meta-sub" id="rulesCount"></span>
       </div>
       <div id="metaBody"><div class="empty">加载中…</div></div>
@@ -291,8 +291,8 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
     <!-- 中部：全部报销单据（全宽表格） -->
     <section class="card list-card">
       <div class="rules-head">
-        <h3>📋 报销单据 <span id="listMeta" class="meta-sub" style="display:inline"></span></h3>
-        <span class="meta-sub">💡 点击任一行可打开详情并审核 / 修改 / 删除</span>
+        <h3> 报销单据 <span id="listMeta" class="meta-sub" style="display:inline"></span></h3>
+        <span class="meta-sub"> 点击任一行可打开详情并审核 / 修改 / 删除</span>
       </div>
       <div class="filters">
         <select id="fStatus"><option value="">全部状态</option></select>
@@ -321,8 +321,8 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
     <div class="modal-mask hidden" id="detailModal">
       <div class="modal">
         <div class="modal-head">
-          <h3 id="modalTitle">🔍 单据详情</h3>
-          <button class="modal-close" id="modalClose" title="关闭">✕</button>
+          <h3 id="modalTitle"> 单据详情</h3>
+          <button class="modal-close" id="modalClose" title="关闭"></button>
         </div>
         <div class="modal-body" id="detailBody">
           <div class="empty" id="detailEmpty">点击左侧任一单据查看详情并操作</div>
@@ -332,7 +332,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
 
               <div class="modal-ops">
                 <div class="panel" id="reviewPanel">
-                  <h4>✅ 审核</h4>
+                  <h4> 审核</h4>
                   <div class="row">
                     <select id="reviewStatus">
                       <option value="已通过">已通过</option>
@@ -347,20 +347,20 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
                 </div>
 
                 <div class="panel" id="updatePanel">
-                  <h4>✏️ 修改字段</h4>
+                  <h4> 修改字段</h4>
                   <p class="hint">仅「不改留空」的字段会被提交；可选字段依本表结构下发。</p>
                   <div id="updateFields"></div>
                   <button class="btn btn-primary" id="updateBtn">保存修改</button>
                 </div>
 
                 <div class="panel danger-zone" id="dangerPanel">
-                  <h4>⚠️ 危险操作</h4>
+                  <h4> 危险操作</h4>
                   <div class="field" id="deleteBox">
                     <label for="deleteReason">删除理由（≥2 字，必填）</label>
                     <input id="deleteReason" maxlength="200" placeholder="如：重复提交" />
                   </div>
                   <div class="row">
-                    <button class="btn btn-danger" id="deleteBtn">🗑 删除此单</button>
+                    <button class="btn btn-danger" id="deleteBtn"> 删除此单</button>
                   </div>
                   <p class="hint" style="margin-top:8px">
                     删除为物理删除，飞书侧行数据不可恢复；请先核对上方单号与申请人。
@@ -388,7 +388,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
   <!-- 登录遮罩 -->
   <div class="login-mask" id="loginMask">
     <form class="login-card" id="loginForm">
-      <h2>🔐 登录财务审核台</h2>
+      <h2> 登录财务审核台</h2>
       <p class="sub">员工角色将进入业务聊天页；财务 / 管理员进入本审核台</p>
       <label for="loginUser">用户名</label>
       <input id="loginUser" autocomplete="username" placeholder="如 caiwu" />
@@ -402,11 +402,11 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
   <!-- 员工误入拒绝视图 -->
   <div class="deny" id="denyView">
     <div class="deny-card">
-      <div class="big">🚫</div>
+      <div class="big"></div>
       <h2>角色不符</h2>
       <p>财务审核台仅对「财务 / 管理员」角色开放。<br>您的账号是员工角色，请回到业务工作台提交报销与查询进度。</p>
       <div class="row">
-        <a class="btn btn-primary" href="/" style="text-decoration:none">💬 回到业务工作台</a>
+        <a class="btn btn-primary" href="/" style="text-decoration:none"> 回到业务工作台</a>
         <button class="btn btn-ghost" id="denyLogoutBtn">退出登录</button>
       </div>
     </div>
@@ -596,7 +596,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
     } catch (e) {
       // meta 是整页渲染的地基：失败时在元数据卡给醒目提示（不止 toast）；401 交给重登录流程
       if (e.message !== "__relogin__") {
-        $("metaBody").innerHTML = '<div class="empty" style="color:var(--bad);text-align:left;line-height:1.7">⚠️ '
+        $("metaBody").innerHTML = '<div class="empty" style="color:var(--bad);text-align:left;line-height:1.7"> '
           + escapeHtml(e.message) + "</div>";
       }
       throw e;
@@ -647,7 +647,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
     (META.rules || []).forEach((r) => {
       const li = document.createElement("li"); li.textContent = r; ul.appendChild(li);
     });
-    group("📜 审核规则", ul);
+    group(" 审核规则", ul);
 
     // 字段清单（标签组）
     const tags = (list) => {
@@ -659,8 +659,8 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
       });
       return d;
     };
-    group("✏️ 财务可改字段", tags(META.finance_editable_fields));
-    group("🔒 不可改字段（自动编号/身份盖章/审核留痕）",
+    group(" 财务可改字段", tags(META.finance_editable_fields));
+    group(" 不可改字段（自动编号/身份盖章/审核留痕）",
       tags(["单号", "申请人", "工号", "记录提交时间", "状态", "审核人", "审批意见", "审批时间"]));
 
     // 枚举统计：让财务一眼看到可选项范围
@@ -670,7 +670,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
     stat.textContent = "可选项：状态 " + n(META.statuses) + " · 类型 " + n(META.types) +
       " · 票据 " + n(META.invoice_states) + " · 部门 " + n(META.departments) +
       " · 城市 " + n(META.cities) + " · 合规 " + n(META.compliance_results);
-    group("📊 表内可选项", stat);
+    group(" 表内可选项", stat);
 
     // 飞书表格直达链接（仅 https 才渲染，防注入）
     const url = META.table_url || "";
@@ -678,9 +678,9 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
       const box2 = document.createElement("div");
       const a = document.createElement("a");
       a.href = url; a.target = "_blank"; a.rel = "noopener";
-      a.textContent = "📎 打开飞书表格";
+      a.textContent = " 打开飞书表格";
       box2.appendChild(a);
-      group("🔗 数据源", box2);
+      group(" 数据源", box2);
     }
     $("rulesCount").textContent = "共 " + (META.finance_editable_fields || []).length + " 个可改字段";
   }
@@ -737,7 +737,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
       tr.appendChild(td(fmtTs(r.reviewed_at)));
       tr.appendChild(td(clip(r.invoice_info, 16)));
       const files = Array.isArray(r.invoice_files) ? r.invoice_files : [];
-      tr.appendChild(td(files.length ? "📎 " + files.length : ""));
+      tr.appendChild(td(files.length ? " " + files.length : ""));
       tr.addEventListener("click", () => selectRow(r.record_id));
       body.appendChild(tr);
     });
@@ -787,7 +787,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
   }
 
   function renderDetail(r) {
-    $("modalTitle").textContent = "🔍 单据详情 · " + (r.bill_no || "(无单号)");
+    $("modalTitle").textContent = " 单据详情 · " + (r.bill_no || "(无单号)");
     $("detailEmpty").style.display = "none";
     $("detailInner").style.display = "";
     const kv = $("detailKv");
@@ -832,7 +832,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
       const isImg = String(f.type || "").indexOf("image/") === 0;
       const link = document.createElement("a");
       link.href = "#";
-      link.textContent = "📎 " + name + size + (isImg ? "（点击预览）" : "（点击下载）");
+      link.textContent = " " + name + size + (isImg ? "（点击预览）" : "（点击下载）");
       link.addEventListener("click", async (ev) => {
         ev.preventDefault();
         if (!token || !record_id) { toast("该附件信息不完整，无法查看", "bad"); return; }
@@ -871,7 +871,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
     return box;
   }
 
-  /* 页内图片预览层：点击遮罩/✕/ESC 关闭；图片自适应窗口不撑破 */
+  /* 页内图片预览层：点击遮罩//ESC 关闭；图片自适应窗口不撑破 */
   function showImagePreview(url, name) {
     const mask = $("imgPreview");
     const img = $("imgPreviewImg");
@@ -907,7 +907,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
         status: $("reviewStatus").value,
         opinion: opinion,
       });
-      toast("✅ 审核已写入飞书", "ok");
+      toast(" 审核已写入飞书", "ok");
       await loadList();
       selectRow(SELECTED.record_id);
     } catch (e) { if (e.message !== "__relogin__") toast(e.message, "bad"); }
@@ -980,7 +980,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
     $("updateBtn").disabled = true;
     try {
       await api("/finance/update", { record_id: SELECTED.record_id, fields: fields });
-      toast("✅ 修改已写入飞书", "ok");
+      toast(" 修改已写入飞书", "ok");
       await loadList();
       selectRow(SELECTED.record_id);
     } catch (e) { if (e.message !== "__relogin__") toast(e.message, "bad"); }
@@ -999,7 +999,7 @@ th, td { text-align: left; padding: 11px 9px; border-bottom: 1px solid var(--lin
     $("deleteBtn").disabled = true;
     try {
       await api("/finance/delete", { record_id: SELECTED.record_id, reason: reason });
-      toast("🗑 已从飞书删除", "ok");
+      toast(" 已从飞书删除", "ok");
       SELECTED = null;
       closeModal();
       await loadList();

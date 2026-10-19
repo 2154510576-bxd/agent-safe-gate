@@ -13,9 +13,10 @@ M5 · API 网关（FastAPI）
 - POST /logout           Authorization: Bearer <token>   登出（jti 拉黑）
 - POST /chat             {session_id?, text, image_b64?} 主对话入口（多轮记忆 + B 跨轮补全 + M9 发票图）
 - POST /ocr              {session_id?, image_b64, filename?} M9 发票 OCR 识别（DeepSeek 视觉）
-- POST /reimburse        {applicant,rtype,amount,...}    结构化填单直提（直连飞书）
+- POST /reimburse        {department,rtype,amount,...}   结构化填单直提（直连飞书多维表，申请人/工号以登录身份为准）
 - POST /progress         {applicant?|bill_no?}           进度查询
-- POST /finance/{meta,list,detail,review,update,delete}  财务审核页六端点（直连飞书，角色限财务/管理员）
+- POST /finance/{meta,list,detail,review,update,delete}  财务审核页六端点：meta/list/detail 读直连飞书（只读），
+                                                              review/update/delete 经主服务器写入口（角色限财务/管理员）
 
 M8 认证墙：除 /health /（静态页）/login 外一律需 Bearer token（fail-closed——
 认证未配置时受保护端点直接 401，不做匿名放行）。
@@ -68,6 +69,7 @@ from models.ocr import (
 from models.users import ROLE_EMPLOYEE, ROLE_FINANCE, ROLE_ADMIN
 from .session import SessionStore
 from .auth_service import AuthService, build_auth
+from . import backend_client
 from security.guard import sanitize_text, check_injection, RateLimiter
 
 from fastapi import FastAPI, HTTPException, Header, Request, Query
@@ -335,11 +337,22 @@ _FINANCE_EDITABLE = (
     "发票日期", "合规结果", "风险摘要",
 )
 
-# 审核动作允许写入的状态（表内单选只有这 4 个：待审核/审核中/已通过/已驳回）
-_FINANCE_REVIEW_STATUS = ("已通过", "已驳回")
+# 审核动作允许写入的状态（走主服务器状态机后放宽：审核中/已通过/已驳回；待审核不可由审核动作写入）
+_FINANCE_REVIEW_STATUS = ("审核中", "已通过", "已驳回")
 
 # 审核前允许的状态（终态不可再审）
 _FINANCE_REVIEWABLE_FROM = ("待审核", "审核中")
+
+
+def _format_amount(amt: float) -> str:
+    """金额归一成干净字符串：整数不带小数，小数去尾随零（避免 1800.0 / 1e3 等）。
+
+    主服务器 /api/invoice/update 的 fields 是 Dictionary<string,string>，金额字段要字符串，
+    且自行做类型转换——这里只负责"干净字符串"形态。
+    """
+    if amt == int(amt):
+        return str(int(amt))
+    return ("%.2f" % amt).rstrip("0").rstrip(".")
 
 
 def _finance_row(row: dict) -> dict:
@@ -671,9 +684,6 @@ def dispatch(method: str, path: str, body: Dict[str, Any], agent: XiaoCaiAgent,
         denied = _finance_role_gate(auth_ctx)
         if denied:
             return denied
-        feishu, table_id = _finance_feishu(agent)
-        if not feishu:
-            return 503, {"error": "未接入飞书多维表格（缺少 FEISHU_APP_ID / FEISHU_TABLE_ID 配置）"}
         record_id = (body.get("record_id") or "").strip()
         status = (body.get("status") or "").strip()
         opinion = (body.get("opinion") or "").strip()
@@ -684,33 +694,24 @@ def dispatch(method: str, path: str, body: Dict[str, Any], agent: XiaoCaiAgent,
         if len(opinion) < 2:
             return 400, {"error": "审批意见至少 2 个字"}
 
-        def _do_review():
-            rec = feishu.get_record(table_id, record_id)
-            if not rec or not rec.get("record_id"):
-                return 404, {"error": "单据不存在或已被删除"}
-            cur = str((rec.get("fields") or {}).get("状态") or "")
-            if cur and cur not in _FINANCE_REVIEWABLE_FROM:
-                return 400, {"error": f"当前状态「{cur}」为终态，不可再审核"}
-            # 审批时间：飞书日期列只接受 int/float 毫秒，字符串会报
-            # DateTimeFieldConvFail(code=1254064)，这里统一转整数毫秒（东八区）
-            now_ms = int(time.time() * 1000)
-            feishu.update_record(table_id, record_id, {
-                "状态": status,
-                "审核人": auth_ctx.get("name") or auth_ctx.get("username", ""),
-                "审批意见": opinion,
-                "审批时间": now_ms,
-            })
-            return 200, {"message": f"已审核：{status}"}
-
-        return _finance_feishu_call(_do_review)
+        # 经主服务器写入口：服务端做权限矩阵 / 状态机 / 盖章（审核人+审批时间）/
+        # 整行快照 / 审计哈希链。网关不传审核人与审批时间。终态由主服务器状态机判定。
+        try:
+            data = backend_client.review_as(
+                auth_ctx.get("username", ""),
+                record_id=record_id, status=status, opinion=opinion)
+        except backend_client.BackendRejected as e:
+            return (e.status or 400), {"error": str(e)}
+        except backend_client.BackendSessionMissing as e:
+            return 503, {"error": str(e)}
+        except backend_client.BackendError as e:
+            return 502, {"error": f"主服务器暂时不可用：{e}"}
+        return 200, {"message": data.get("message") or f"已审核：{status}"}
 
     if method == "POST" and path == "/finance/update":
         denied = _finance_role_gate(auth_ctx)
         if denied:
             return denied
-        feishu, table_id = _finance_feishu(agent)
-        if not feishu:
-            return 503, {"error": "未接入飞书多维表格（缺少 FEISHU_APP_ID / FEISHU_TABLE_ID 配置）"}
         record_id = (body.get("record_id") or "").strip()
         patch = body.get("fields") or {}
         if not record_id:
@@ -718,49 +719,56 @@ def dispatch(method: str, path: str, body: Dict[str, Any], agent: XiaoCaiAgent,
         if not isinstance(patch, dict) or not patch:
             return 400, {"error": "没有要修改的字段"}
 
-        def _do_update():
-            rec = feishu.get_record(table_id, record_id)
-            if not rec or not rec.get("record_id"):
-                return 404, {"error": "单据不存在或已被删除"}
-            fields = {}
-            for name, value in patch.items():
-                if name not in _FINANCE_EDITABLE:
-                    return 400, {"error": f"字段不允许修改：{name}"}
-                fields[name] = value
-            # 日期列必须转毫秒整数：飞书对 "2026-10-11" 这类字符串报
-            # DateTimeFieldConvFail(code=1254064)，只接受 int/float 时间戳
-            if "发票日期" in fields:
-                ts = _parse_date_to_ts(fields["发票日期"])
-                if ts is None:
-                    return 400, {"error": "发票日期格式无法解析（应为 YYYY-MM-DD 或 YYYY/M/D）"}
-                fields["发票日期"] = ts
-            # 金额列飞书是数字型，前端可能传字符串，统一转数字（非法值直接拒）
-            if "金额" in fields:
-                try:
-                    fields["金额"] = float(fields["金额"])
-                except (TypeError, ValueError):
-                    return 400, {"error": "金额必须是数字"}
-            # 枚举校验（单选字段值必须在表内选项内）+ 剔除表里不存在的列
-            errs = validate_enum_fields(fields)
-            if errs:
-                # validate_enum_fields 返回 [(字段, 非法值), ...]
-                detail = "；".join(f"{f}：{v}（不在允许枚举内）" for f, v in errs)
-                return 400, {"error": detail}
+        fields = {}
+        for name, value in patch.items():
+            if name not in _FINANCE_EDITABLE:
+                return 400, {"error": f"字段不允许修改：{name}"}
+            fields[name] = value
+        # 日期：网关先校验可解析，再归一成 YYYY-MM-DD 字符串发给主服务器
+        # （主服务器自己转毫秒写飞书，网关不传毫秒）
+        if "发票日期" in fields:
+            ts = _parse_date_to_ts(fields["发票日期"])
+            if ts is None:
+                return 400, {"error": "发票日期格式无法解析（应为 YYYY-MM-DD 或 YYYY/M/D）"}
+            fields["发票日期"] = time.strftime("%Y-%m-%d", time.localtime(ts / 1000))
+        # 金额：校验为数字后归一成干净字符串（不要科学计数 / 千分位，主服务器要求 string）
+        if "金额" in fields:
+            try:
+                amt = float(fields["金额"])
+            except (TypeError, ValueError):
+                return 400, {"error": "金额必须是数字"}
+            fields["金额"] = _format_amount(amt)
+        # 枚举校验（提前拦；主服务器为权威）
+        errs = validate_enum_fields(fields)
+        if errs:
+            detail = "；".join(f"{f}：{v}（不在允许枚举内）" for f, v in errs)
+            return 400, {"error": detail}
+        # 表结构过滤（有飞书表时按真实列过滤；否则信任主服务器过滤）
+        feishu, table_id = _finance_feishu(agent)
+        if feishu and table_id:
             fields = filter_by_schema(fields, feishu.field_names(table_id))
-            if not fields:
-                return 400, {"error": "没有可写入的字段（可能被表结构过滤）"}
-            feishu.update_record(table_id, record_id, fields)
-            return 200, {"message": f"已修改 {len(fields)} 个字段并写入飞书"}
+        if not fields:
+            return 400, {"error": "没有可写入的字段（可能被表结构过滤）"}
 
-        return _finance_feishu_call(_do_update)
+        # 经主服务器写入口（服务端做合规复算 / 盖章 / 快照 / 审计）
+        try:
+            data = backend_client.update_as(
+                auth_ctx.get("username", ""),
+                record_id=record_id, fields=fields)
+        except backend_client.BackendRejected as e:
+            return (e.status or 400), {"error": str(e)}
+        except backend_client.BackendSessionMissing as e:
+            return 503, {"error": str(e)}
+        except backend_client.BackendError as e:
+            return 502, {"error": f"主服务器暂时不可用：{e}"}
+        return 200, {"message": data.get("message") or f"已修改 {len(fields)} 个字段"}
 
     if method == "POST" and path == "/finance/delete":
-        denied = _finance_role_gate(auth_ctx)   # 财务与管理员均可删（用户 2026-10-19 拍板）
+        # 角色门保留（财务与管理员均可触达该端点）；最终删除权由主服务器权限矩阵裁决
+        #（invoice.delete 仅管理员及以上，财务会收到主服务器 403，文案原样回显）。
+        denied = _finance_role_gate(auth_ctx)
         if denied:
             return denied
-        feishu, table_id = _finance_feishu(agent)
-        if not feishu:
-            return 503, {"error": "未接入飞书多维表格（缺少 FEISHU_APP_ID / FEISHU_TABLE_ID 配置）"}
         record_id = (body.get("record_id") or "").strip()
         reason = (body.get("reason") or "").strip()
         if not record_id:
@@ -768,15 +776,18 @@ def dispatch(method: str, path: str, body: Dict[str, Any], agent: XiaoCaiAgent,
         if len(reason) < 2:
             return 400, {"error": "请填写删除理由（至少 2 个字）"}
 
-        def _do_delete():
-            rec = feishu.get_record(table_id, record_id)
-            if not rec or not rec.get("record_id"):
-                return 404, {"error": "单据不存在或已被删除"}
-            bill_no = (rec.get("fields") or {}).get("单号") or record_id
-            feishu.delete_record(table_id, record_id)
-            return 200, {"message": f"已删除单据 {bill_no}（理由：{reason}）"}
-
-        return _finance_feishu_call(_do_delete)
+        # 经主服务器写入口（物理删除由主服务器执行，附审计与快照）
+        try:
+            data = backend_client.delete_as(
+                auth_ctx.get("username", ""),
+                record_id=record_id, reason=reason)
+        except backend_client.BackendRejected as e:
+            return (e.status or 400), {"error": str(e)}
+        except backend_client.BackendSessionMissing as e:
+            return 503, {"error": str(e)}
+        except backend_client.BackendError as e:
+            return 502, {"error": f"主服务器暂时不可用：{e}"}
+        return 200, {"message": data.get("message") or f"已删除单据 {record_id}（理由：{reason}）"}
 
     return 404, {"error": "not found", "path": path}
 

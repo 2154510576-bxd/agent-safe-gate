@@ -7,7 +7,8 @@ M8 · 认证运行时（装配层）
 设计要点
 ---------
 - 登录限流**只计失败次数**（would_allow 预检 + 失败才 hit），正常登录不消耗配额；
-- 账号权威在飞书用户表：角色直接取表内「角色」列（员工/财务/管理员），无二次映射；
+- 账号权威在主服务器 AiApprovalServer：登录先请主服务器判定口令，角色直接取主服务器
+  返回的（employee/finance/admin/superadmin），二次映射为界面三标签（员工/财务/管理员）；
 - token 校验用 AUTH_SECRET HMAC 验签，logout 走内存 jti 黑名单；
 - sid 绑定：服务端不再盲信 body 里的 session_id——某 sid 首次出现即绑定到当前用户，
   后续同 sid 换用户 → 403（防会话串用/越权读取他人草稿与上下文）。
@@ -21,9 +22,18 @@ from security.auth import TokenRevoker, issue_token, verify_token
 from security.guard import RateLimiter
 from models import users
 from models.feishu import FeishuBitableClient
+from . import backend_client
 
 # 登录响应/前端展示用的用户字段（绝不含 密码哈希/盐）
 PUBLIC_USER_KEYS = ("工号", "姓名", "用户名", "角色")
+
+# 主服务器四角色 → 本网关三标签（superadmin 在界面上等同管理员）
+ROLE_LABELS = {
+    "employee": "员工",
+    "finance": "财务",
+    "admin": "管理员",
+    "superadmin": "管理员",
+}
 
 
 class AuthService:
@@ -40,14 +50,51 @@ class AuthService:
     def login(self, username: str, password: str, client_ip: str = ""):
         """登录。返回 (http_status, payload)。失败只计失败次数的限流配额。
 
-        账号权威在飞书用户表（口令哈希加盐存储）：三角色标签直接取表内「角色」列，
-        不做二次映射——角色即数据，改权限只需改表。
+        账号权威在主服务器 AiApprovalServer：登录先请主服务器判定口令，成功后再用
+        主服务器返回的账号资料（角色/姓名/工号）签发本网关会话；令牌缓存供后续
+        写请求做 HMAC 签名复用。主服务器 4xx 直接失败、不回落本地表；连不上时按
+        BACKEND_MODE 决定兜底（preferred 回本地表 / required 直接拒绝）。
         """
         username = (username or "").strip()
         key = f"{username}|{client_ip}"
         if not self.login_limiter.would_allow(key):
             return 429, {"error": "登录尝试过于频繁，请几分钟后再试"}
 
+        # ① 主服务器优先（账号权威）
+        if backend_client.enabled():
+            try:
+                user = backend_client.login(username, password)
+            except backend_client.BackendRejected as e:
+                # 口令错/账号停用/锁定/限流：业务结论，绝不回落本地表
+                return 401, {"error": str(e)}
+            except (backend_client.BackendUnavailable,
+                    backend_client.BackendSessionMissing) as e:
+                # 连不上/会话缺失：看模式
+                if backend_client.mode() == "required":
+                    return 503, {"error": f"主服务器不可达，已按 required 模式拒绝登录：{e}"}
+                return self._login_local(username, password, key)
+            # 成功：用主服务器下发的资料建 claims（角色以主服务器为准）
+            role = ROLE_LABELS.get((user.get("role") or "employee"), "员工")
+            claims = {
+                "username": user.get("userName") or username,
+                "name": user.get("displayName") or user.get("userName") or username,
+                "role": role,
+                "employee_id": user.get("employeeId") or "",
+            }
+            public = {
+                "工号": claims["employee_id"],
+                "姓名": claims["name"],
+                "用户名": claims["username"],
+                "角色": claims["role"],
+            }
+            return self._issue(username, claims, public,
+                               f"主服务器已校验（角色={role}，工号={claims['employee_id']}）")
+
+        # 未启用主服务器：纯本地用户表
+        return self._login_local(username, password, key)
+
+    def _login_local(self, username: str, password: str, key: str):
+        """本地飞书用户表兜底登录（仅 preferred 模式且主服务器不可达时）。"""
         item, err = users.authenticate(self.users, username, password or "")
         if err:
             self.login_limiter.allow(key)  # 仅失败计数
@@ -60,7 +107,7 @@ class AuthService:
             "employee_id": f.get("工号", ""),
         }
         public = {k: f.get(k, "") for k in PUBLIC_USER_KEYS}
-        return self._issue(username, claims, public, "飞书用户表校验")
+        return self._issue(username, claims, public, "本地用户表校验（主服务器未启用或不可达）")
 
     def _issue(self, username: str, claims: dict, public: dict, note: str):
         """签发本地会话 token（登录成功统一出口；note 注明本次账号权威来源）。"""

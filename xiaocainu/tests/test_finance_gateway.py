@@ -1,11 +1,13 @@
 #财务审核网关层单测（离线、零网络、零真实凭证）
-#覆盖：/finance/* 直连飞书多维表——角色墙、财务可删（无管理员门）、
-#中文→snake_case 投影剔除内部键、审核写四字段、修改白名单+枚举校验、
-#飞书异常上抛不吞错、record_id 仅作操作句柄。
+#覆盖：/finance/* 写操作经主服务器写入口（backend_client.*_as）——角色墙、字段白名单、
+#中文→snake_case 投影剔除内部键、错误映射（4xx 原样 / 5xx 502 / 会话缺失 503）、
+#只读端点（list/detail/attachment）继续直连飞书。
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import pytest
 
 from models.retriever import Retriever, Chunk
 from models.llm import LLMAdapter, MockProvider
@@ -17,6 +19,8 @@ from api.session import SessionStore
 from api.auth_service import AuthService
 from security.auth import issue_token
 from security.guard import RateLimiter
+import api.backend_client as bc_mod
+from api.backend_client import BackendError, BackendRejected
 
 CORPUS = [
     Chunk(text="差旅费报销需提供出差审批单、交通票据、住宿发票。单人住宿标准不超过300元/晚。",
@@ -29,7 +33,7 @@ AUTH_SECRET = "unit-test-secret-finance"
 
 
 class MockFeishu:
-    """离线替代飞书客户端：内存表 + 操作留痕（断言直连写入）。"""
+    """离线替代飞书客户端：内存表 + 操作留痕（只读端点断言）。"""
 
     def __init__(self, rows=None, schema=None):
         self.rows = rows or []          # [{record_id, fields:{中文字段}}]
@@ -132,7 +136,7 @@ def _role_tok(username: str, role: str) -> str:
 
 
 def _fin_tok() -> str:
-    """财务角色 token，带真实姓名（审核要写入「审核人」）。"""
+    """财务角色 token，带真实姓名（审核要由主服务器按令牌盖章）。"""
     claims = {"username": "caiwu", "name": "钱会计", "role": "财务", "employee_id": "E0002"}
     return "Bearer " + issue_token(claims, AUTH_SECRET, 600)
 
@@ -155,6 +159,39 @@ def _seed_rows():
             "金额": 2000, "事由": "客户接待", "票据状态": "有票", "城市": "上海",
             "记录提交时间": 1759171200000, "状态": "审核中"}},
     ]
+
+
+class _Captured:
+    """捕获主服务器适配层调用（验证网关转发了哪些参数）。"""
+    def __init__(self):
+        self.review = []
+        self.update = []
+        self.delete = []
+
+
+@pytest.fixture
+def fake_backend(monkeypatch):
+    """用捕获型假适配器替换 backend_client.*_as，验证网关转发而非直连飞书。"""
+    cap = _Captured()
+
+    def review_as(username, *, record_id, status, opinion):
+        cap.review.append({"username": username, "record_id": record_id,
+                           "status": status, "opinion": opinion})
+        return {"message": f"已审核：{status}"}
+
+    def update_as(username, *, record_id, fields):
+        cap.update.append({"username": username, "record_id": record_id,
+                           "fields": dict(fields)})
+        return {"message": f"已修改 {len(fields)} 个字段"}
+
+    def delete_as(username, *, record_id, reason):
+        cap.delete.append({"username": username, "record_id": record_id, "reason": reason})
+        return {"message": f"已删除单据 {record_id}（理由：{reason}）"}
+
+    monkeypatch.setattr(bc_mod, "review_as", review_as)
+    monkeypatch.setattr(bc_mod, "update_as", update_as)
+    monkeypatch.setattr(bc_mod, "delete_as", delete_as)
+    return cap
 
 
 # ---------------------------------------------------------- 角色墙
@@ -203,7 +240,8 @@ def test_finance_meta_capabilities_and_enums():
     assert p["departments"] == ["研发部", "财务部"], p
     assert p["types"] == ["差旅费", "招待费"], p
     assert p["invoice_states"] == ["有票", "无票"], p
-    assert p["review_statuses"] == ["已通过", "已驳回"], p
+    # 审核状态放宽为主服务器允许的集合（待审核/审核中 可改为 已通过/已驳回）
+    assert p["review_statuses"] == ["审核中", "已通过", "已驳回"], p
     assert "单号" not in p["finance_editable_fields"], "AutoNumber 不可改"
     assert "状态" not in p["finance_editable_fields"], "状态只能经审核动作改"
     assert "申请人" not in p["finance_editable_fields"], "申请人属身份盖章字段"
@@ -249,31 +287,38 @@ def test_finance_detail_projection():
     print("[PASS] test_finance_detail_projection")
 
 
-# ---------------------------------------------------------- review：写四字段
-def test_finance_review_writes_four_fields():
+# ---------------------------------------------------------- review：转发主服务器（盖章/快照/审计在服务端）
+def test_finance_review_forwards_to_backend(fake_backend):
     auth = _auth()
     fin = _fin_tok()
-    fs = MockFeishu(_seed_rows())
-    a = _agent(feishu=fs)
+    a = _agent()
 
     code, p = dispatch("POST", "/finance/review",
                        {"record_id": "recOld", "status": "已通过", "opinion": "同意报销"},
                        a, SessionStore(), auth=auth, token=fin)
     assert code == 200 and "已通过" in p.get("message", ""), (code, p)
-    rid, fields = fs.updated[-1]
-    assert rid == "recOld", fs.updated
-    assert fields["状态"] == "已通过", fields
-    assert fields["审核人"] == "钱会计", "审核人必须是登录人姓名"
-    assert fields["审批意见"] == "同意报销", fields
-    assert isinstance(fields["审批时间"], int) and fields["审批时间"] > 1_600_000_000_000, fields
-    print("[PASS] test_finance_review_writes_four_fields")
+    assert fake_backend.review, fake_backend.review
+    c = fake_backend.review[-1]
+    assert c["record_id"] == "recOld" and c["status"] == "已通过" and c["opinion"] == "同意报销", c
+    assert c["username"] == "caiwu", "审核人由主服务器按令牌盖章，网关只传登录用户名"
 
 
-def test_finance_review_rejects_bad_input():
+def test_finance_review_does_not_stamp_reviewer_or_time(fake_backend):
+    """网关只转发 record_id/status/opinion，绝不传审核人/审批时间（服务端盖章）。"""
     auth = _auth()
     fin = _fin_tok()
-    fs = MockFeishu(_seed_rows())
-    a = _agent(feishu=fs)
+    a = _agent()
+    dispatch("POST", "/finance/review",
+             {"record_id": "recOld", "status": "已通过", "opinion": "同意报销"},
+             a, SessionStore(), auth=auth, token=fin)
+    c = fake_backend.review[-1]
+    assert set(c.keys()) == {"username", "record_id", "status", "opinion"}, c
+
+
+def test_finance_review_rejects_bad_input(fake_backend):
+    auth = _auth()
+    fin = _fin_tok()
+    a = _agent()
 
     code, p = dispatch("POST", "/finance/review",
                        {"record_id": "recOld", "status": "待审核", "opinion": "随便改"},
@@ -283,28 +328,48 @@ def test_finance_review_rejects_bad_input():
                        {"record_id": "recOld", "status": "已通过", "opinion": "好"},
                        a, SessionStore(), auth=auth, token=fin)
     assert code == 400 and "2 个字" in p.get("error", ""), (code, p)
-    fs.rows[0]["fields"]["状态"] = "已通过"   # 终态
+    # 终态由主服务器状态机裁定，网关不再本地拦截；被网关拒绝的请求不得转发主服务器
+    assert fake_backend.review == [], "被网关拒绝的审核不得转发主服务器"
+
+
+def test_finance_review_backend_rejection_mapped(fake_backend, monkeypatch):
+    """主服务器业务拒绝（如终态不可再审）原样映射为 4xx。"""
+    def review_as(username, *, record_id, status, opinion):
+        raise BackendRejected("该单据已是终态，不可再审", 400)
+    monkeypatch.setattr(bc_mod, "review_as", review_as)
+
+    auth = _auth(); fin = _fin_tok(); a = _agent()
     code, p = dispatch("POST", "/finance/review",
-                       {"record_id": "recOld", "status": "已驳回", "opinion": "再改一次"},
+                       {"record_id": "recOld", "status": "已通过", "opinion": "同意报销"},
                        a, SessionStore(), auth=auth, token=fin)
     assert code == 400 and "终态" in p.get("error", ""), (code, p)
-    assert fs.updated == [], "被拒的审核不得写飞书"
-    print("[PASS] test_finance_review_rejects_bad_input")
 
 
-# ---------------------------------------------------------- update：白名单 + 枚举
-def test_finance_update_whitelist_and_enum():
+def test_finance_review_backend_unavailable_502(fake_backend, monkeypatch):
+    """主服务器 5xx/超时 → 502，提示主服务器不可用。"""
+    def review_as(username, *, record_id, status, opinion):
+        raise BackendError("主服务器连接被拒绝")
+    monkeypatch.setattr(bc_mod, "review_as", review_as)
+
+    auth = _auth(); fin = _fin_tok(); a = _agent()
+    code, p = dispatch("POST", "/finance/review",
+                       {"record_id": "recOld", "status": "已通过", "opinion": "同意报销"},
+                       a, SessionStore(), auth=auth, token=fin)
+    assert code == 502 and "主服务器" in p.get("error", ""), (code, p)
+
+
+# ---------------------------------------------------------- update：白名单 + 枚举 + 字段口径
+def test_finance_update_whitelist_and_enum(fake_backend):
     auth = _auth()
     fin = _fin_tok()
-    fs = MockFeishu(_seed_rows())
-    a = _agent(feishu=fs)
+    a = _agent()
 
     code, p = dispatch("POST", "/finance/update",
                        {"record_id": "recOld", "fields": {"金额": 999, "事由": "改备注"}},
                        a, SessionStore(), auth=auth, token=fin)
     assert code == 200, (code, p)
-    rid, fields = fs.updated[-1]
-    assert fields["金额"] == 999 and fields["事由"] == "改备注", fields
+    c = fake_backend.update[-1]
+    assert c["fields"]["金额"] == "999" and c["fields"]["事由"] == "改备注", c["fields"]
     code, p = dispatch("POST", "/finance/update",
                        {"record_id": "recOld", "fields": {"申请人": "李四"}},
                        a, SessionStore(), auth=auth, token=fin)
@@ -316,56 +381,88 @@ def test_finance_update_whitelist_and_enum():
     print("[PASS] test_finance_update_whitelist_and_enum")
 
 
-# ---------------------------------------------------------- delete：财务也可删
-def test_finance_finance_role_can_delete():
+def test_finance_update_date_sent_as_yyyymmdd(fake_backend):
+    """网关把界面日期归一成 YYYY-MM-DD 字符串发给主服务器（主服务器自己转毫秒写飞书）。"""
     auth = _auth()
-    fin = _fin_tok()      # 财务角色，非管理员
-    fs = MockFeishu(_seed_rows())
-    a = _agent(feishu=fs)
+    fin = _fin_tok()
+    a = _agent()
+
+    code, p = dispatch("POST", "/finance/update",
+                       {"record_id": "recOld", "fields": {"发票日期": "2026-10-19"}},
+                       a, SessionStore(), auth=auth, token=fin)
+    assert code == 200, (code, p)
+    c = fake_backend.update[-1]
+    assert c["fields"]["发票日期"] == "2026-10-19", \
+        f"日期必须发 YYYY-MM-DD 字符串，实际 {c['fields'].get('发票日期')!r}"
+
+
+def test_finance_update_rejects_bad_date_and_amount(fake_backend):
+    """日期无法解析 / 金额非数字 → 400 且不转发主服务器。"""
+    auth = _auth()
+    fin = _fin_tok()
+    a = _agent()
+
+    code, p = dispatch("POST", "/finance/update",
+                       {"record_id": "recOld", "fields": {"发票日期": "不是日期"}},
+                       a, SessionStore(), auth=auth, token=fin)
+    assert code == 400 and "发票日期" in p.get("error", ""), (code, p)
+    code, p = dispatch("POST", "/finance/update",
+                       {"record_id": "recOld", "fields": {"金额": "abc"}},
+                       a, SessionStore(), auth=auth, token=fin)
+    assert code == 400 and "金额" in p.get("error", ""), (code, p)
+    assert fake_backend.update == [], "被拒的修改不得转发主服务器"
+
+
+# ---------------------------------------------------------- delete：转发主服务器（权限矩阵在服务端）
+def test_finance_delete_forwards_to_backend(fake_backend):
+    """财务可触达删除端点；最终删除权由主服务器矩阵裁决（invoice.delete 仅管理员）。
+    网关负责转发 + 错误映射，不藏按钮也不自行放行。"""
+    auth = _auth()
+    fin = _fin_tok()
+    a = _agent()
 
     code, p = dispatch("POST", "/finance/delete",
                        {"record_id": "recOld", "reason": "重复提交"},
                        a, SessionStore(), auth=auth, token=fin)
     assert code == 200 and "已删除" in p.get("message", ""), (code, p)
-    assert fs.deleted == ["recOld"], fs.deleted
-    assert len(fs.rows) == 1, "行应真的被移除"
+    c = fake_backend.delete[-1]
+    assert c["record_id"] == "recOld" and c["reason"] == "重复提交", c
+    assert c["username"] == "caiwu", "删除由主服务器按令牌裁决，网关只传登录用户名"
+    # 理由太短 → 网关提前拦，不转发
     code, p = dispatch("POST", "/finance/delete",
                        {"record_id": "recNew", "reason": "x"},
                        a, SessionStore(), auth=auth, token=fin)
     assert code == 400 and "删除理由" in p.get("error", ""), (code, p)
-    print("[PASS] test_finance_finance_role_can_delete")
+    print("[PASS] test_finance_delete_forwards_to_backend")
 
 
-def test_finance_delete_missing_row_404():
-    auth = _auth()
-    fin = _fin_tok()
-    fs = MockFeishu(_seed_rows())
-    a = _agent(feishu=fs)
+def test_finance_delete_finance_gets_403_from_backend(monkeypatch):
+    """主服务器矩阵：invoice.delete 仅管理员；财务点删除收主服务器 403，文案原样回显。"""
+    def delete_as(username, *, record_id, reason):
+        raise BackendRejected("只有管理员可以删除报销单", 403)
+    monkeypatch.setattr(bc_mod, "delete_as", delete_as)
 
+    auth = _auth(); fin = _fin_tok(); a = _agent()
+    code, p = dispatch("POST", "/finance/delete",
+                       {"record_id": "recOld", "reason": "重复提交"},
+                       a, SessionStore(), auth=auth, token=fin)
+    assert code == 403 and "只有管理员" in p.get("error", ""), (code, p)
+
+
+def test_finance_delete_missing_row_maps_backend_404(monkeypatch):
+    """删除不存在的单据：网关转发主服务器，主服务器返回 404 → 网关原样 404。"""
+    def delete_as(username, *, record_id, reason):
+        raise BackendRejected("记录不存在", 404)
+    monkeypatch.setattr(bc_mod, "delete_as", delete_as)
+
+    auth = _auth(); fin = _fin_tok(); a = _agent()
     code, p = dispatch("POST", "/finance/delete",
                        {"record_id": "recNope", "reason": "删不存在的"},
                        a, SessionStore(), auth=auth, token=fin)
     assert code == 404, (code, p)
-    assert fs.deleted == [], "不存在单据不得触发删除调用"
-    print("[PASS] test_finance_delete_missing_row_404")
 
 
-# ---------------------------------------------------------- 飞书异常上抛不吞错
-def test_finance_feishu_error_surfaces():
-    auth = _auth()
-    fin = _fin_tok()
-    fs = MockFeishu(_seed_rows())
-    fs.fail_on = "更新"
-    a = _agent(feishu=fs)
-
-    code, p = dispatch("POST", "/finance/review",
-                       {"record_id": "recOld", "status": "已通过", "opinion": "同意"},
-                       a, SessionStore(), auth=auth, token=fin)
-    assert code == 502 and "飞书" in p.get("error", ""), (code, p)
-    print("[PASS] test_finance_feishu_error_surfaces")
-
-
-# ---------------------------------------------------------- 未接入飞书时 fail-closed
+# ---------------------------------------------------------- 未接入飞书时（只读端点）fail-closed
 def test_finance_without_feishu_503():
     auth = _auth()
     fin = _fin_tok()
@@ -376,58 +473,15 @@ def test_finance_without_feishu_503():
     print("[PASS] test_finance_without_feishu_503")
 
 
-def test_finance_update_converts_date_to_millis():
-    """飞书日期列只接受 int/float 毫秒：前端 date input 给的是 'YYYY-MM-DD' 字符串，
-    直传会报 DateTimeFieldConvFail(code=1254064)。这里验后端转换到位。"""
-    auth = _auth()
-    fin = _fin_tok()
-    fs = MockFeishu(_seed_rows())
-    a = _agent(feishu=fs)
-
-    code, p = dispatch("POST", "/finance/update",
-                       {"record_id": "recOld", "fields": {"发票日期": "2026-10-19"}},
-                       a, SessionStore(), auth=auth, token=fin)
-    assert code == 200, (code, p)
-    rid, fields = fs.updated[-1]
-    assert isinstance(fields["发票日期"], int), f"日期必须转成整数毫秒，实际 {type(fields['发票日期'])}"
-    # 2026-10-19 东八区 0 点的毫秒时间戳
-    assert fields["发票日期"] == 1792339200000, fields["发票日期"]
-    print("[PASS] test_finance_update_converts_date_to_millis")
-
-
-def test_finance_update_rejects_bad_date_and_amount():
-    """日期无法解析 / 金额非数字 → 400 且不写飞书。"""
-    auth = _auth()
-    fin = _fin_tok()
-    fs = MockFeishu(_seed_rows())
-    a = _agent(feishu=fs)
-
-    code, p = dispatch("POST", "/finance/update",
-                       {"record_id": "recOld", "fields": {"发票日期": "不是日期"}},
-                       a, SessionStore(), auth=auth, token=fin)
-    assert code == 400 and "发票日期" in p.get("error", ""), (code, p)
-    code, p = dispatch("POST", "/finance/update",
-                       {"record_id": "recOld", "fields": {"金额": "abc"}},
-                       a, SessionStore(), auth=auth, token=fin)
-    assert code == 400 and "金额" in p.get("error", ""), (code, p)
-    assert fs.updated == [], "被拒的修改不得写飞书"
-    print("[PASS] test_finance_update_rejects_bad_date_and_amount")
-
-
-def test_finance_review_time_is_int_millis():
-    """审批时间必须是整数毫秒（字符串会触发飞书 DateTimeFieldConvFail）。"""
-    auth = _auth()
-    fin = _fin_tok()
-    fs = MockFeishu(_seed_rows())
-    a = _agent(feishu=fs)
-
-    dispatch("POST", "/finance/review",
-             {"record_id": "recOld", "status": "已通过", "opinion": "同意报销"},
-             a, SessionStore(), auth=auth, token=fin)
-    rid, fields = fs.updated[-1]
-    assert isinstance(fields["审批时间"], int), f"审批时间必须是 int，实际 {type(fields['审批时间'])}"
-    assert not isinstance(fields["审批时间"], bool)
-    print("[PASS] test_finance_review_time_is_int_millis")
+# ---------------------------------------------------------- 投影函数直测
+def test_finance_row_projection_drops_unknown_keys():
+    row = {"record_id": "recX", "单号": "BX-1", "金额": 100, "神秘键": "不该出现",
+           "raw": {"a": 1}}
+    out = _finance_row(row)
+    assert out["bill_no"] == "BX-1" and out["amount"] == 100 and out["record_id"] == "recX", out
+    assert "神秘键" not in out and "raw" not in out, out
+    assert out["reviewer"] == "" and out["invoice_info"] == "", out
+    print("[PASS] test_finance_row_projection_drops_unknown_keys")
 
 
 def test_finance_projection_includes_invoice_files():
@@ -522,37 +576,28 @@ def test_progress_query_allowed_for_all_roles():
     print("[PASS] test_progress_query_allowed_for_all_roles")
 
 
-# ---------------------------------------------------------- 投影函数直测
-def test_finance_row_projection_drops_unknown_keys():
-    row = {"record_id": "recX", "单号": "BX-1", "金额": 100, "神秘键": "不该出现",
-           "raw": {"a": 1}}
-    out = _finance_row(row)
-    assert out["bill_no"] == "BX-1" and out["amount"] == 100 and out["record_id"] == "recX", out
-    assert "神秘键" not in out and "raw" not in out, out
-    assert out["reviewer"] == "" and out["invoice_info"] == "", out
-    print("[PASS] test_finance_row_projection_drops_unknown_keys")
-
-
 if __name__ == "__main__":
     test_finance_role_gate_only_finance_and_admin()
     test_finance_meta_capabilities_and_enums()
     test_finance_list_projection_and_order()
     test_finance_detail_projection()
-    test_finance_review_writes_four_fields()
+    test_finance_review_forwards_to_backend()
+    test_finance_review_does_not_stamp_reviewer_or_time()
     test_finance_review_rejects_bad_input()
+    test_finance_review_backend_rejection_mapped()
+    test_finance_review_backend_unavailable_502()
     test_finance_update_whitelist_and_enum()
-    test_finance_finance_role_can_delete()
-    test_finance_delete_missing_row_404()
-    test_finance_feishu_error_surfaces()
-    test_finance_without_feishu_503()
-    test_finance_update_converts_date_to_millis()
+    test_finance_update_date_sent_as_yyyymmdd()
     test_finance_update_rejects_bad_date_and_amount()
-    test_finance_review_time_is_int_millis()
+    test_finance_delete_forwards_to_backend()
+    test_finance_delete_finance_gets_403_from_backend()
+    test_finance_delete_missing_row_maps_backend_404()
+    test_finance_without_feishu_503()
+    test_finance_row_projection_drops_unknown_keys()
     test_finance_projection_includes_invoice_files()
     test_finance_download_media_rejects_bad_token()
-    test_finance_attachment_route_not_public()
     test_finance_download_media_rejects_non_official_url()
+    test_finance_attachment_route_not_public()
     test_finance_role_cannot_use_chat_or_submit()
     test_progress_query_allowed_for_all_roles()
-    test_finance_row_projection_drops_unknown_keys()
     print("\n财务审核网关层单测全部通过")
